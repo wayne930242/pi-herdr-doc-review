@@ -12,6 +12,10 @@
  * document, the diff from the version the agent last saw goes to the agent as review feedback,
  * steered into a running turn or attached to the user's next message when idle, so a save never
  * starts a turn by itself.
+ *
+ * HTML files open rendered and view-only in one Chawan (`cha`) pane per session instead, one buffer
+ * per page. Chawan runs a start-up script that polls its own command file the same way, so new
+ * pages and reloads after the agent changes a page arrive without restarting it.
  */
 
 import { Type } from "@earendil-works/pi-ai";
@@ -20,6 +24,7 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 export const MINI_SDD_FILE = /(^|\/)docs\/specs\/[^/]+\/(decision|spec|design|verification)\.md$/;
 export const MINI_SDD_PHASES = ["decision.md", "spec.md", "design.md", "verification.md"];
@@ -29,6 +34,8 @@ const MESSAGE_TYPE = "doc-review";
 export const EDITOR_ENV = "PI_HERDR_DOC_REVIEW_EDITOR";
 export const EDITORS = ["nvim", "vim"];
 export const POLL_MS = 250;
+export const HTML_FILE = /\.html?$/i;
+export const BROWSER = "cha";
 const READY_WAIT_MS = 5000;
 const READY_POLL_MS = 100;
 
@@ -102,6 +109,13 @@ interface Viewer {
   log: string;
   logOffset: number;
   stopWatch: () => void;
+}
+
+interface Browser {
+  pane: string;
+  dir: string;
+  control: string;
+  ready: string;
 }
 
 interface ShownDoc {
@@ -183,6 +197,31 @@ export function reviewScript(dir: string, control: string, ready: string, log: s
   ].join("\n");
 }
 
+/**
+ * Chawan start-up script. A timer runs each new line of the command file as JavaScript in Chawan's
+ * client context; a page reloads only while it is the current buffer, since Chawan reloads no other.
+ */
+export function browserScript(control: string): string {
+  return [
+    `const control = ${JSON.stringify(control)};`,
+    "let done = 0;",
+    "globalThis.piDocReviewReload = (url) => {",
+    "  if (decodeURIComponent(String(pager.url)) === decodeURIComponent(url)) pager.reload();",
+    "};",
+    "setInterval(() => {",
+    '  const lines = (readFile(control) ?? "").split("\\n").filter(Boolean);',
+    "  const todo = lines.slice(done);",
+    "  done = Math.max(done, lines.length);",
+    "  for (const line of todo) {",
+    "    try {",
+    "      (0, eval)(line);",
+    "    } catch {}",
+    "  }",
+    `}, ${POLL_MS});`,
+    "",
+  ].join("\n");
+}
+
 /** The user's edits as zero-context hunks: the `@@` headers carry the line numbers. */
 function feedbackMessage(display: string, diff: string): string {
   const hunks = diff
@@ -195,16 +234,30 @@ function feedbackMessage(display: string, diff: string): string {
 
 export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultDeps) {
   let viewer: Viewer | undefined;
+  let browser: Browser | undefined;
   let ctx: ExtensionContext | undefined;
   const shown = new Map<string, ShownDoc>();
+  /** HTML pages on screen, with the content the browser last loaded. */
+  const pages = new Map<string, string>();
 
   const alive = (ready: string): boolean => {
     const pid = Number(deps.readFile(ready)?.trim());
     return Number.isInteger(pid) && pid > 0 && deps.pidAlive(pid);
   };
   const viewerAlive = (): boolean => viewer !== undefined && alive(viewer.ready);
-  /** Queues an Ex command; the editor runs it on its next poll. */
-  const command = (target: Viewer, line: string): void => deps.appendFile(target.control, `${line}\n`);
+  const browserAlive = (): boolean => browser !== undefined && alive(browser.ready);
+  /** Queues an Ex command for the editor, or a JavaScript line for the browser; it runs on the next poll. */
+  const command = (target: { control: string }, line: string): void => deps.appendFile(target.control, `${line}\n`);
+  /** Reloads the HTML pages whose content changed since the browser last loaded them. */
+  const reloadPages = (paths: Iterable<string>): void => {
+    for (const path of paths) {
+      const before = pages.get(path);
+      const content = deps.readFile(path);
+      if (before === undefined || content === undefined || content === before) continue;
+      pages.set(path, content);
+      if (browser && browserAlive()) command(browser, `piDocReviewReload(${JSON.stringify(pathToFileURL(path).href)})`);
+    }
+  };
   const reload = (): void => {
     if (viewer && viewerAlive()) command(viewer, "call PiDocReviewReload()");
   };
@@ -275,12 +328,57 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     else deps.removeDir(current.dir);
   };
 
+  const closeBrowser = (): void => {
+    const current = browser;
+    browser = undefined;
+    pages.clear();
+    if (!current) return;
+    // The pane's shell removes the scratch directory once Chawan exits.
+    if (alive(current.ready)) command(current, "quit()");
+    else deps.removeDir(current.dir);
+  };
+
+  /** A new review pane goes below the other review pane when one is open, else right of the agent's pane. */
+  const splitPane = (cwd: string, other: { pane: string } | undefined): string => {
+    const [target, direction] = other ? [other.pane, "down"] : [deps.paneId as string, "right"];
+    const split = herdr("pane", "split", target, "--direction", direction, "--no-focus", "--cwd", cwd);
+    const pane = (JSON.parse(split.stdout) as { result?: { pane?: { pane_id?: string } } }).result?.pane?.pane_id;
+    if (!pane) throw new Error(`herdr pane split returned no pane id: ${split.stdout.trim()}`);
+    return pane;
+  };
+
+  const waitReady = async (ready: string, program: string, pane: string): Promise<void> => {
+    for (let waited = 0; !alive(ready); waited += READY_POLL_MS) {
+      if (waited >= READY_WAIT_MS) throw new Error(`${program} in pane ${pane} did not start within ${READY_WAIT_MS} ms`);
+      await deps.sleep(READY_POLL_MS);
+    }
+  };
+
+  const launchBrowser = async (cwd: string, paths: string[]): Promise<void> => {
+    closeBrowser();
+    if (!deps.onPath(BROWSER)) throw new Error(`HTML review needs Chawan (${BROWSER}) on PATH`);
+    const pane = splitPane(cwd, viewer && viewerAlive() ? viewer : undefined);
+    const dir = deps.makeDir();
+    const control = join(dir, "commands.js");
+    const ready = join(dir, "ready");
+    const script = join(dir, "review.js");
+    // The script path sits inside a TOML literal string, which cannot hold a single quote.
+    if (script.includes("'")) throw new Error(`cannot start ${BROWSER} from a scratch path containing a quote: ${script}`);
+    deps.writeFile(control, "");
+    deps.writeFile(script, browserScript(control));
+    browser = { pane, dir, control, ready };
+    const startup = `start.startup-script='(0, eval)(readFile(${JSON.stringify(script)}))'`;
+    const inner = `echo $$ > ${shellQuote(ready)}; ${BROWSER} -o ${shellQuote(startup)} -- ${paths.map(shellQuote).join(" ")}; rm -rf ${shellQuote(dir)}`;
+    // `exit` closes the pane when the user quits Chawan; the next HTML show opens a fresh one.
+    herdr("pane", "run", pane, `sh -c ${shellQuote(inner)}; exit`);
+    herdr("pane", "rename", pane, "html review");
+    await waitReady(ready, BROWSER, pane);
+  };
+
   const launch = async (cwd: string, paths: string[]): Promise<void> => {
     closeViewer();
     const editor = chooseEditor();
-    const split = herdr("pane", "split", deps.paneId as string, "--direction", "right", "--no-focus", "--cwd", cwd);
-    const pane = (JSON.parse(split.stdout) as { result?: { pane?: { pane_id?: string } } }).result?.pane?.pane_id;
-    if (!pane) throw new Error(`herdr pane split returned no pane id: ${split.stdout.trim()}`);
+    const pane = splitPane(cwd, browser && browserAlive() ? browser : undefined);
     const dir = deps.makeDir();
     const control = join(dir, "commands.vim");
     const ready = join(dir, "ready");
@@ -293,10 +391,35 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     // `exit` closes the pane when the user quits the editor; the next show opens a fresh one.
     herdr("pane", "run", pane, `${editor} -S ${shellQuote(script)} -o -- ${paths.map(shellQuote).join(" ")}; exit`);
     herdr("pane", "rename", pane, "doc review");
-    for (let waited = 0; !alive(ready); waited += READY_POLL_MS) {
-      if (waited >= READY_WAIT_MS) throw new Error(`${editor} in pane ${pane} did not start within ${READY_WAIT_MS} ms`);
-      await deps.sleep(READY_POLL_MS);
+    await waitReady(ready, editor, pane);
+  };
+
+  /** Opens text documents in the editor; returns the ones not already on screen. */
+  const showText = async (cwd: string, docs: { absolute: string; content: string; display: string }[]) => {
+    const running = viewer !== undefined && viewerAlive();
+    const fresh = running ? docs.filter((doc) => !shown.has(doc.absolute)) : docs;
+    if (viewer && running) {
+      for (const doc of docs) command(viewer, `call PiDocReviewAdd(${vimLiteral(doc.absolute)})`);
+      reload();
+    } else {
+      await launch(cwd, docs.map((doc) => doc.absolute));
     }
+    for (const doc of docs) shown.set(doc.absolute, shown.get(doc.absolute) ?? { display: doc.display, snapshot: doc.content });
+    return fresh;
+  };
+
+  /** Opens HTML pages in the browser; returns the ones not already on screen. */
+  const showHtml = async (cwd: string, docs: { absolute: string; content: string }[]) => {
+    const running = browser !== undefined && browserAlive();
+    const fresh = running ? docs.filter((doc) => !pages.has(doc.absolute)) : docs;
+    if (browser && running) {
+      for (const doc of fresh) command(browser, `pager.gotoURL(${JSON.stringify(pathToFileURL(doc.absolute).href)})`);
+      reloadPages(docs.map((doc) => doc.absolute));
+    } else {
+      await launchBrowser(cwd, docs.map((doc) => doc.absolute));
+    }
+    for (const doc of fresh) pages.set(doc.absolute, doc.content);
+    return fresh;
   };
 
   const show = async (cwd: string, paths: string[], reason: string): Promise<ShowResult> => {
@@ -310,19 +433,19 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     });
     const names = docs.map((doc) => doc.display).join(", ");
     if (!deps.paneId) return { opened: [], text: `Not running inside Herdr, so no review pane opened. Tell the user to read: ${names}` };
-    const running = viewer !== undefined && viewerAlive();
-    const fresh = running ? docs.filter((doc) => !shown.has(doc.absolute)) : docs;
-    if (viewer && running) {
-      for (const doc of docs) command(viewer, `call PiDocReviewAdd(${vimLiteral(doc.absolute)})`);
-      reload();
-    } else {
-      await launch(cwd, docs.map((doc) => doc.absolute));
-    }
-    for (const doc of docs) shown.set(doc.absolute, shown.get(doc.absolute) ?? { display: doc.display, snapshot: doc.content });
+    const texts = docs.filter((doc) => !HTML_FILE.test(doc.absolute));
+    const htmls = docs.filter((doc) => HTML_FILE.test(doc.absolute));
+    const fresh = [...(texts.length > 0 ? await showText(cwd, texts) : []), ...(htmls.length > 0 ? await showHtml(cwd, htmls) : [])];
     if (fresh.length > 0) herdr("notification", "show", "Document ready for review", "--body", `${reason}: ${names}`, "--sound", "request");
+    const list = (group: typeof docs) => group.map((doc) => doc.display).join(", ");
+    const opened = [
+      ...(texts.length > 0 ? [`${list(texts)} in Herdr pane ${viewer?.pane} (editable ${viewer?.editor}, one row per document)`] : []),
+      ...(htmls.length > 0 ? [`${list(htmls)} in Herdr pane ${browser?.pane} (rendered by Chawan, view-only, one buffer per page)`] : []),
+    ];
+    const feedback = texts.length > 0 ? " Their saved edits will reach you as review feedback." : "";
     return {
       opened: docs.map((doc) => doc.display),
-      text: `Opened ${names} in Herdr pane ${viewer?.pane} (editable ${viewer?.editor}, one row per document) and returned without waiting for the user. Their saved edits will reach you as review feedback.`,
+      text: `Opened ${opened.join(" and ")} and returned without waiting for the user.${feedback}`,
     };
   };
 
@@ -338,6 +461,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
 
   /** After the agent changes a shown document, the version it saw is the new one, and the pane reloads it. */
   const agentWrote = (path: string): void => {
+    reloadPages([path]);
     const doc = shown.get(path);
     if (!doc) return;
     doc.snapshot = deps.readFile(path) ?? doc.snapshot;
@@ -345,6 +469,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
   };
 
   const refreshAfterShell = (): void => {
+    reloadPages([...pages.keys()]);
     if (shown.size === 0) return;
     for (const [path, doc] of shown) doc.snapshot = deps.readFile(path) ?? doc.snapshot;
     reload();
@@ -355,7 +480,11 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     get viewer() {
       return viewer;
     },
+    get browser() {
+      return browser;
+    },
     shown,
+    pages,
     setContext: (next: ExtensionContext) => {
       ctx = next;
     },
@@ -364,6 +493,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     agentWrote,
     refreshAfterShell,
     closeViewer,
+    closeBrowser,
   };
 }
 
@@ -375,9 +505,11 @@ export default function docReview(pi: ExtensionAPI, deps: DocReviewDeps = defaul
       name: "show_doc",
       label: "Show document",
       description:
-        "Open documents the user should review in an editable nvim or vim pane beside this session, one row per document (Herdr only; elsewhere it returns the paths to name to the user). " +
-        "Use it when you want the user to read or approve a document: a spec, design, plan, report, or ADR. " +
-        "It returns at once without waiting for the user. Documents stay open and reload when you edit them; the user's saved edits come back to you as a diff.",
+        "Open documents the user should review in a pane beside this session (Herdr only; elsewhere it returns the paths to name to the user). " +
+        "Text documents open in one editable nvim or vim pane, one row per document, and the user's saved edits come back to you as a diff. " +
+        "HTML files (.html, .htm) open rendered and view-only in one Chawan pane, one buffer per page. " +
+        "Use it whenever the user must review or confirm written material: a spec, design, plan, report, diff, or comparison. " +
+        "It returns at once without waiting for the user. Documents stay open and reload when you edit them.",
       parameters: Type.Object({
         paths: Type.Array(Type.String({ description: "File path, absolute or relative to the working directory" }), { minItems: 1 }),
         reason: Type.String({ description: "One short line telling the user what to review, e.g. 'Spec ready for approval'" }),
@@ -414,5 +546,8 @@ export default function docReview(pi: ExtensionAPI, deps: DocReviewDeps = defaul
     }
   });
 
-  pi.on("session_shutdown", () => review.closeViewer());
+  pi.on("session_shutdown", () => {
+    review.closeViewer();
+    review.closeBrowser();
+  });
 }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import docReview, { createDocReview, MAX_DIFF_CHARS } from "../src/index.ts";
 
 const SCRATCH = "/tmp/review-1";
@@ -16,8 +17,11 @@ function fake(options = {}) {
   const sent = [];
   const notices = [];
   const watchers = new Map();
-  const state = { editorUp: false, unsaved: 0, splits: 0, removed: [], idle: true };
-  const installed = options.installed ?? ["nvim", "vim"];
+  const state = { editorUp: false, browserUp: false, unsaved: 0, splits: 0, removed: [], idle: true };
+  const installed = options.installed ?? ["nvim", "vim", "cha"];
+  const dirs = options.dirs ?? [SCRATCH];
+  let made = 0;
+  let lastDir = SCRATCH;
   const quitEditor = () => {
     state.editorUp = false;
     fs.delete(READY);
@@ -27,7 +31,7 @@ function fake(options = {}) {
     herdr: "herdr",
     editor: options.editor,
     onPath: (command) => installed.includes(command),
-    pidAlive: (pid) => state.editorUp && pid === 4242,
+    pidAlive: (pid) => (state.editorUp && pid === 4242) || (state.browserUp && pid === 5151),
     run: (command, args) => {
       calls.push([command, ...args]);
       if (command === "herdr" && args[0] === "pane" && args[1] === "split") {
@@ -35,8 +39,10 @@ function fake(options = {}) {
         return { status: 0, stdout: JSON.stringify({ result: { pane: { pane_id: `w:p${state.splits + 1}` } } }), stderr: "" };
       }
       if (command === "herdr" && args[0] === "pane" && args[1] === "run") {
-        state.editorUp = true;
-        fs.set(READY, "4242\n");
+        const isBrowser = args[3].includes(" cha -o ");
+        if (isBrowser) state.browserUp = true;
+        else state.editorUp = true;
+        fs.set(`${lastDir}/ready`, isBrowser ? "5151\n" : "4242\n");
         return { status: 0, stdout: "", stderr: "" };
       }
       if (command === "herdr") return { status: 0, stdout: "{}", stderr: "" };
@@ -47,13 +53,17 @@ function fake(options = {}) {
       }
       throw new Error(`unexpected ${command}`);
     },
-    makeDir: () => SCRATCH,
+    makeDir: () => {
+      lastDir = dirs[Math.min(made++, dirs.length - 1)];
+      return lastDir;
+    },
     removeDir: (dir) => state.removed.push(dir),
     readFile: (path) => fs.get(path),
     writeFile: (path, content) => fs.set(path, content),
     appendFile: (path, content) => {
       fs.set(path, `${fs.get(path) ?? ""}${content}`);
       if (path === CONTROL && content === "call PiDocReviewClose()\n" && state.unsaved === 0) quitEditor();
+      if (path.endsWith("/commands.js") && content === "quit()\n") state.browserUp = false;
     },
     realpath: (path) => path,
     watch: (path, onChange) => {
@@ -72,6 +82,10 @@ function fake(options = {}) {
   const commands = () => (fs.get(CONTROL) ?? "").split("\n").filter(Boolean);
   return { deps, fs, calls, sent, notices, state, pi, ctx, userSaves, quitEditor, commands };
 }
+
+/** The words a POSIX shell splits `line` into, without running it. */
+const shellWords = (line) =>
+  spawnSync("sh", ["-c", 'eval "set -- $1"; printf "%s\\0" "$@"', "sh", line], { encoding: "utf8" }).stdout.split("\0").slice(0, -1);
 
 const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call[2] === "run");
 
@@ -282,6 +296,79 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   await handlers.get("tool_result")({ toolName: "write", isError: false, input: { path: `${SPEC_DIR}/spec.md` } }, t.ctx);
   assert.equal(t.calls.length, 0);
   assert.equal(t.notices.length, 0);
+}
+
+// HTML opens rendered and view-only in a Chawan pane; text documents keep the editor.
+{
+  const WEB = "/tmp/review-2";
+  const t = fake({ dirs: [SCRATCH, WEB], files: { "/repo/a.md": "A", "/repo/report.html": "<h1>v1</h1>" } });
+  const review = createDocReview(t.pi, t.deps);
+  review.setContext(t.ctx);
+  const result = await review.show(CWD, ["a.md", "report.html"], "Please read");
+  assert.deepEqual(result.opened, ["a.md", "report.html"]);
+  assert.match(result.text, /a\.md in Herdr pane w:p2 \(editable nvim, one row per document\) and report\.html in Herdr pane w:p3 \(rendered by Chawan, view-only/);
+  assert.match(result.text, /saved edits will reach you/);
+  const runs = t.calls.filter((call) => call[0] === "herdr" && call[2] === "run").map((call) => call.at(-1));
+  assert.match(runs[0], /^nvim .* -- '\/repo\/a\.md'; exit$/, "the HTML page does not open in the editor");
+  const splits = t.calls.filter((call) => call[2] === "split");
+  assert.deepEqual(splits[1].slice(3, 6), ["w:p2", "--direction", "down"], "the browser pane stacks below the editor pane");
+  // Split the command the way the pane's shell does, so the assertion sees the arguments Chawan receives.
+  const [sh, flag, inner, ...rest] = shellWords(runs[1].replace(/; exit$/, ""));
+  assert.deepEqual([sh, flag, rest], ["sh", "-c", []]);
+  const [recordPid, run, cleanUp] = inner.split("; ");
+  assert.equal(recordPid, `echo $$ > '${WEB}/ready'`, "the pane's shell records its pid");
+  assert.deepEqual(shellWords(run), ["cha", "-o", `start.startup-script='(0, eval)(readFile("${WEB}/review.js"))'`, "--", "/repo/report.html"]);
+  assert.equal(cleanUp, `rm -rf '${WEB}'`, "the scratch dir goes once Chawan exits");
+  const script = t.fs.get(`${WEB}/review.js`);
+  assert.match(script, /const control = "\/tmp\/review-2\/commands\.js";/);
+  assert.match(script, /setInterval\(\(\) => \{[\s\S]*\(0, eval\)\(line\)[\s\S]*\}, 250\);/, "Chawan polls its command file");
+  const browserCommands = () => (t.fs.get(`${WEB}/commands.js`) ?? "").split("\n").filter(Boolean);
+
+  // A second HTML page opens as a new buffer in the running browser.
+  t.fs.set("/repo/other.html", "<p>other</p>");
+  await review.show(CWD, ["other.html"], "One more");
+  assert.equal(t.state.splits, 2, "the browser pane is reused");
+  assert.deepEqual(browserCommands(), ['pager.gotoURL("file:///repo/other.html")']);
+  await review.show(CWD, ["other.html"], "Again");
+  assert.equal(browserCommands().length, 1, "a page already open is not opened twice");
+
+  // The agent's change reloads the page; an unchanged page is left alone, even after a shell command.
+  review.agentWrote("/repo/report.html");
+  assert.equal(browserCommands().length, 1, "an unchanged page does not reload");
+  t.fs.set("/repo/report.html", "<h1>v2</h1>");
+  review.agentWrote("/repo/report.html");
+  assert.equal(browserCommands().at(-1), 'piDocReviewReload("file:///repo/report.html")');
+  review.refreshAfterShell();
+  assert.equal(browserCommands().length, 2);
+  t.fs.set("/repo/other.html", "<p>shell</p>");
+  review.refreshAfterShell();
+  assert.equal(browserCommands().at(-1), 'piDocReviewReload("file:///repo/other.html")');
+  assert.equal(t.sent.length, 0, "HTML pages send the agent no feedback");
+
+  // Shutdown quits Chawan; its pane's shell removes the scratch dir.
+  review.closeBrowser();
+  assert.equal(browserCommands().at(-1), "quit()");
+  assert.equal(t.state.browserUp, false);
+  assert.deepEqual(t.state.removed, []);
+}
+
+// An HTML-only show splits right of the agent and promises no edit feedback; without Chawan it fails.
+{
+  const t = fake({ files: { "/repo/page.htm": "<p>x</p>" } });
+  const review = createDocReview(t.pi, t.deps);
+  const result = await review.show(CWD, ["page.htm"], "Look");
+  assert.deepEqual(t.calls[0], ["herdr", "pane", "split", "w:p1", "--direction", "right", "--no-focus", "--cwd", CWD]);
+  assert.doesNotMatch(result.text, /saved edits/);
+  assert.equal(review.viewer, undefined, "no editor starts for HTML alone");
+
+  // A browser the user already quit is replaced, and its scratch dir goes.
+  t.state.browserUp = false;
+  await review.show(CWD, ["page.htm"], "Look again");
+  assert.equal(t.state.splits, 2);
+  assert.deepEqual(t.state.removed, [SCRATCH]);
+
+  const none = fake({ installed: ["nvim"], files: { "/repo/page.html": "<p>x</p>" } });
+  await assert.rejects(createDocReview(none.pi, none.deps).show(CWD, ["page.html"], "Look"), /needs Chawan \(cha\) on PATH/);
 }
 
 console.log("pi-doc-review: ok");
