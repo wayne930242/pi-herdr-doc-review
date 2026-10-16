@@ -15,7 +15,10 @@
  *
  * HTML files open rendered and view-only in one Chawan (`cha`) pane per session instead, one buffer
  * per page. Chawan runs a start-up script that polls its own command file the same way, so new
- * pages and reloads after the agent changes a page arrive without restarting it.
+ * pages and reloads after the agent changes a page arrive without restarting it. A form whose action
+ * is `cgi-bin:pi-answer` sends its fields to the agent the same way a save does: Chawan runs that
+ * local CGI script from the scratch directory, which appends the query string to an answers file.
+ * Chawan blocks a POST from a `file:` page to `cgi-bin:`, so the form submits with GET.
  */
 
 import { Type } from "@earendil-works/pi-ai";
@@ -36,6 +39,8 @@ export const EDITORS = ["nvim", "vim"];
 export const POLL_MS = 250;
 export const HTML_FILE = /\.html?$/i;
 export const BROWSER = "cha";
+/** The local CGI script an HTML form names as `action="cgi-bin:pi-answer"` to send its fields to the agent. */
+export const ANSWER_CGI = "pi-answer";
 const READY_WAIT_MS = 5000;
 const READY_POLL_MS = 100;
 
@@ -56,7 +61,7 @@ export interface DocReviewDeps {
   makeDir: () => string;
   removeDir: (dir: string) => void;
   readFile: (path: string) => string | undefined;
-  writeFile: (path: string, content: string) => void;
+  writeFile: (path: string, content: string, mode?: number) => void;
   appendFile: (path: string, content: string) => void;
   realpath: (path: string) => string;
   watch: (path: string, onChange: () => void) => () => void;
@@ -89,7 +94,7 @@ const defaultDeps: DocReviewDeps = {
       return undefined;
     }
   },
-  writeFile: (path, content) => writeFileSync(path, content),
+  writeFile: (path, content, mode) => writeFileSync(path, content, { mode }),
   appendFile: (path, content) => appendFileSync(path, content),
   realpath: (path) => (existsSync(path) ? realpathSync(path) : path),
   watch: (path, onChange) => {
@@ -116,6 +121,9 @@ interface Browser {
   dir: string;
   control: string;
   ready: string;
+  answers: string;
+  answersOffset: number;
+  stopWatch: () => void;
 }
 
 interface ShownDoc {
@@ -222,6 +230,16 @@ export function browserScript(control: string): string {
   ].join("\n");
 }
 
+/** The local CGI script behind `cgi-bin:pi-answer`: it records one submitted form and confirms it. */
+export function answerScript(answers: string): string {
+  return [
+    "#!/bin/sh",
+    `printf '%s\\n' "$QUERY_STRING" >> ${shellQuote(answers)}`,
+    "printf 'Content-Type: text/html; charset=utf-8\\n\\n<p>Sent to the agent. Press , to return to the page.</p>\\n'",
+    "",
+  ].join("\n");
+}
+
 /** The user's edits as zero-context hunks: the `@@` headers carry the line numbers. */
 function feedbackMessage(display: string, diff: string): string {
   const hunks = diff
@@ -279,14 +297,14 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     return result;
   };
 
-  const deliver = (text: string, display: string): void => {
+  const deliver = (text: string, notice: string): void => {
     const message = { customType: MESSAGE_TYPE, content: text, display: true };
     if (ctx && !ctx.isIdle()) {
       pi.sendMessage(message, { deliverAs: "steer" });
       return;
     }
     pi.sendMessage(message, { deliverAs: "nextTurn" });
-    if (ctx?.hasUI) ctx.ui.notify(`Your edits to ${display} go to the agent with your next message.`, "info");
+    if (ctx?.hasUI) ctx.ui.notify(`${notice} go to the agent with your next message.`, "info");
   };
 
   const onSave = (path: string, dir: string): void => {
@@ -299,7 +317,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     const diff = deps.run("diff", ["-U0", "--label", `a/${doc.display}`, "--label", `b/${doc.display}`, scratch, path]);
     if (diff.status !== 0 && diff.status !== 1) throw new Error(`diff failed: ${diff.stderr.trim()}`);
     doc.snapshot = content;
-    deliver(feedbackMessage(doc.display, diff.stdout), doc.display);
+    deliver(feedbackMessage(doc.display, diff.stdout), `Your edits to ${doc.display}`);
   };
 
   const readSaves = (): void => {
@@ -328,11 +346,24 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     else deps.removeDir(current.dir);
   };
 
+  /** Each submitted form is one query string line in the answers file. */
+  const readAnswers = (): void => {
+    if (!browser) return;
+    const log = deps.readFile(browser.answers) ?? "";
+    const fresh = log.slice(browser.answersOffset);
+    browser.answersOffset = log.length;
+    for (const line of fresh.split("\n").filter(Boolean)) {
+      const fields = [...new URLSearchParams(line)].map(([name, value]) => `- ${name}: ${value}`);
+      deliver(`User submitted a form in the HTML review pane:\n${fields.join("\n") || "(no fields)"}`, "Your form answers");
+    }
+  };
+
   const closeBrowser = (): void => {
     const current = browser;
     browser = undefined;
     pages.clear();
     if (!current) return;
+    current.stopWatch();
     // The pane's shell removes the scratch directory once Chawan exits.
     if (alive(current.ready)) command(current, "quit()");
     else deps.removeDir(current.dir);
@@ -364,11 +395,16 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     const script = join(dir, "review.js");
     // The script path sits inside a TOML literal string, which cannot hold a single quote.
     if (script.includes("'")) throw new Error(`cannot start ${BROWSER} from a scratch path containing a quote: ${script}`);
+    const answers = join(dir, "answers.log");
     deps.writeFile(control, "");
+    deps.writeFile(answers, "");
     deps.writeFile(script, browserScript(control));
-    browser = { pane, dir, control, ready };
+    deps.writeFile(join(dir, ANSWER_CGI), answerScript(answers), 0o755);
+    browser = { pane, dir, control, ready, answers, answersOffset: 0, stopWatch: deps.watch(answers, readAnswers) };
     const startup = `start.startup-script='(0, eval)(readFile(${JSON.stringify(script)}))'`;
-    const inner = `echo $$ > ${shellQuote(ready)}; ${BROWSER} -o ${shellQuote(startup)} -- ${paths.map(shellQuote).join(" ")}; rm -rf ${shellQuote(dir)}`;
+    // The scratch dir serves the answer script; Chawan's own directory serves file: and its other schemes.
+    const cgiDirs = `external.cgi-dir=['${dir}', '$CHA_LIBEXEC_DIR/cgi-bin']`;
+    const inner = `echo $$ > ${shellQuote(ready)}; ${BROWSER} -o ${shellQuote(startup)} -o ${shellQuote(cgiDirs)} -- ${paths.map(shellQuote).join(" ")}; rm -rf ${shellQuote(dir)}`;
     // `exit` closes the pane when the user quits Chawan; the next HTML show opens a fresh one.
     herdr("pane", "run", pane, `sh -c ${shellQuote(inner)}; exit`);
     herdr("pane", "rename", pane, "html review");
@@ -507,8 +543,9 @@ export default function docReview(pi: ExtensionAPI, deps: DocReviewDeps = defaul
       description:
         "Open documents the user should review in a pane beside this session (Herdr only; elsewhere it returns the paths to name to the user). " +
         "Text documents open in one editable nvim or vim pane, one row per document, and the user's saved edits come back to you as a diff. " +
-        "HTML files (.html, .htm) open rendered and view-only in one Chawan pane, one buffer per page. " +
-        "Use it whenever the user must review or confirm written material: a spec, design, plan, report, diff, or comparison. " +
+        "HTML files (.html, .htm) open rendered in one Chawan pane, one buffer per page; Chawan runs no JavaScript. " +
+        "To collect answers, put a `<form action=\"cgi-bin:pi-answer\">` (method GET) with radio buttons, selects, or text inputs and a submit button on the page; each submit comes back to you as the form's fields. " +
+        "Use it whenever the user must understand or confirm written material: a spec, design, plan, report, or comparison; write material meant for understanding as HTML. " +
         "It returns at once without waiting for the user. Documents stay open and reload when you edit them.",
       parameters: Type.Object({
         paths: Type.Array(Type.String({ description: "File path, absolute or relative to the working directory" }), { minItems: 1 }),

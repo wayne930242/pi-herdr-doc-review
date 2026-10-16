@@ -80,7 +80,11 @@ function fake(options = {}) {
     watchers.get(`${SCRATCH}/saves.log`)();
   };
   const commands = () => (fs.get(CONTROL) ?? "").split("\n").filter(Boolean);
-  return { deps, fs, calls, sent, notices, state, pi, ctx, userSaves, quitEditor, commands };
+  const userSubmits = (dir, query) => {
+    fs.set(`${dir}/answers.log`, `${fs.get(`${dir}/answers.log`) ?? ""}${query}\n`);
+    watchers.get(`${dir}/answers.log`)();
+  };
+  return { deps, fs, calls, sent, notices, state, pi, ctx, userSaves, userSubmits, quitEditor, commands, watchers };
 }
 
 /** The words a POSIX shell splits `line` into, without running it. */
@@ -317,7 +321,28 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   assert.deepEqual([sh, flag, rest], ["sh", "-c", []]);
   const [recordPid, run, cleanUp] = inner.split("; ");
   assert.equal(recordPid, `echo $$ > '${WEB}/ready'`, "the pane's shell records its pid");
-  assert.deepEqual(shellWords(run), ["cha", "-o", `start.startup-script='(0, eval)(readFile("${WEB}/review.js"))'`, "--", "/repo/report.html"]);
+  assert.deepEqual(shellWords(run), [
+    "cha",
+    "-o",
+    `start.startup-script='(0, eval)(readFile("${WEB}/review.js"))'`,
+    "-o",
+    `external.cgi-dir=['${WEB}', '$CHA_LIBEXEC_DIR/cgi-bin']`,
+    "--",
+    "/repo/report.html",
+  ]);
+  assert.match(t.fs.get(`${WEB}/pi-answer`), /^#!\/bin\/sh\nprintf '%s\\n' "\$QUERY_STRING" >> '\/tmp\/review-2\/answers\.log'\n/, "the answer script records the query string");
+
+  // A submitted form reaches the agent as its fields, like a save.
+  t.userSubmits(WEB, "q1=%E6%96%B0+skill&note=a%26b+c");
+  assert.equal(t.sent.length, 1);
+  assert.equal(t.sent[0].options.deliverAs, "nextTurn");
+  assert.equal(t.sent[0].message.content, "User submitted a form in the HTML review pane:\n- q1: 新 skill\n- note: a&b c");
+  assert.match(t.notices.at(-1)[0], /^Your form answers go to the agent/);
+  t.state.idle = false;
+  t.userSubmits(WEB, "q2=yes");
+  assert.equal(t.sent[1].options.deliverAs, "steer");
+  assert.equal(t.sent[1].message.content, "User submitted a form in the HTML review pane:\n- q2: yes", "only the new submission is sent");
+  t.sent.length = 0;
   assert.equal(cleanUp, `rm -rf '${WEB}'`, "the scratch dir goes once Chawan exits");
   const script = t.fs.get(`${WEB}/review.js`);
   assert.match(script, /const control = "\/tmp\/review-2\/commands\.js";/);
@@ -345,11 +370,12 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   assert.equal(browserCommands().at(-1), 'piDocReviewReload("file:///repo/other.html")');
   assert.equal(t.sent.length, 0, "HTML pages send the agent no feedback");
 
-  // Shutdown quits Chawan; its pane's shell removes the scratch dir.
+  // Shutdown quits Chawan and stops watching its answers; its pane's shell removes the scratch dir.
   review.closeBrowser();
   assert.equal(browserCommands().at(-1), "quit()");
   assert.equal(t.state.browserUp, false);
   assert.deepEqual(t.state.removed, []);
+  assert.ok(!t.watchers.has(`${WEB}/answers.log`), "a closed browser's answers are no longer watched");
 }
 
 // An HTML-only show splits right of the agent and promises no edit feedback; without Chawan it fails.
