@@ -297,12 +297,14 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     return result;
   };
 
-  const deliver = (text: string, notice: string): void => {
+  // A save waits for the user's next message; a submitted form is an explicit send, so it starts a turn when idle.
+  const deliver = (text: string, notice: string, start = false): void => {
     const message = { customType: MESSAGE_TYPE, content: text, display: true };
     if (ctx && !ctx.isIdle()) {
       pi.sendMessage(message, { deliverAs: "steer" });
       return;
     }
+    if (start) return void pi.sendMessage(message, { triggerTurn: true });
     pi.sendMessage(message, { deliverAs: "nextTurn" });
     if (ctx?.hasUI) ctx.ui.notify(`${notice} go to the agent with your next message.`, "info");
   };
@@ -354,7 +356,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     browser.answersOffset = log.length;
     for (const line of fresh.split("\n").filter(Boolean)) {
       const fields = [...new URLSearchParams(line)].map(([name, value]) => `- ${name}: ${value}`);
-      deliver(`User submitted a form in the HTML review pane:\n${fields.join("\n") || "(no fields)"}`, "Your form answers");
+      deliver(`User submitted a form in the HTML review pane:\n${fields.join("\n") || "(no fields)"}`, "Your form answers", true);
     }
   };
 
@@ -544,7 +546,7 @@ export default function docReview(pi: ExtensionAPI, deps: DocReviewDeps = defaul
         "Open documents the user should review in a pane beside this session (Herdr only; elsewhere it returns the paths to name to the user). " +
         "Text documents open in one editable nvim or vim pane, one row per document, and the user's saved edits come back to you as a diff. " +
         "HTML files (.html, .htm) open rendered in one Chawan pane, one buffer per page; Chawan runs no JavaScript. " +
-        "To collect answers, put a `<form action=\"cgi-bin:pi-answer\">` (method GET) with radio buttons, selects, or text inputs and a submit button on the page; each submit comes back to you as the form's fields. " +
+        "Pages are for reading: ask the user's questions with your question tool, not in a form on the page. " +
         "Use it whenever the user must understand or confirm written material: a spec, design, plan, report, or comparison; write material meant for understanding as HTML. " +
         "It returns at once without waiting for the user. Documents stay open and reload when you edit them.",
       parameters: Type.Object({

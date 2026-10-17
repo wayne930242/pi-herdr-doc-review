@@ -332,12 +332,13 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   ]);
   assert.match(t.fs.get(`${WEB}/pi-answer`), /^#!\/bin\/sh\nprintf '%s\\n' "\$QUERY_STRING" >> '\/tmp\/review-2\/answers\.log'\n/, "the answer script records the query string");
 
-  // A submitted form reaches the agent as its fields, like a save.
+  // A submitted form reaches the agent as its fields and, unlike a save, starts a turn when the agent is idle.
+  const notices = t.notices.length;
   t.userSubmits(WEB, "q1=%E6%96%B0+skill&note=a%26b+c");
   assert.equal(t.sent.length, 1);
-  assert.equal(t.sent[0].options.deliverAs, "nextTurn");
+  assert.deepEqual(t.sent[0].options, { triggerTurn: true });
   assert.equal(t.sent[0].message.content, "User submitted a form in the HTML review pane:\n- q1: 新 skill\n- note: a&b c");
-  assert.match(t.notices.at(-1)[0], /^Your form answers go to the agent/);
+  assert.equal(t.notices.length, notices, "no 'next message' notice: the answers go now");
   t.state.idle = false;
   t.userSubmits(WEB, "q2=yes");
   assert.equal(t.sent[1].options.deliverAs, "steer");
