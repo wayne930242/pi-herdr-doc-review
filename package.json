@@ -1,6 +1,6 @@
 {
   "name": "pi-herdr-doc-review",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Review the documents your pi agent writes in an editable nvim or vim pane beside it in Herdr: proposed specs open on their own, agent edits reload live, and your saved edits go back to the agent as a diff without blocking it",
   "type": "module",
   "license": "MIT",

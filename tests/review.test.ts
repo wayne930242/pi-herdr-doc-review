@@ -21,6 +21,8 @@ function fake(options = {}) {
   const installed = options.installed ?? ["nvim", "vim", "cha"];
   const dirs = options.dirs ?? [SCRATCH];
   let made = 0;
+  let ids = 0;
+  const timers = [];
   let lastDir = SCRATCH;
   const quitEditor = () => {
     state.editorUp = false;
@@ -71,8 +73,30 @@ function fake(options = {}) {
       return () => watchers.delete(path);
     },
     sleep: async () => {},
+    every: (ms, tick) => {
+      const timer = { ms, tick, running: true };
+      timers.push(timer);
+      return () => {
+        timer.running = false;
+      };
+    },
+    newId: () => `doc-${++ids}`,
   };
-  const pi = { sendMessage: (message, options) => sent.push({ message, options }) };
+  const emitted = [];
+  const listeners = new Map();
+  const pi = {
+    sendMessage: (message, options) => sent.push({ message, options }),
+    events: {
+      emit: (channel, data) => {
+        emitted.push({ channel, data: structuredClone(data) });
+        for (const handler of listeners.get(channel) ?? []) handler(data);
+      },
+      on: (channel, handler) => {
+        listeners.set(channel, [...(listeners.get(channel) ?? []), handler]);
+        return () => listeners.set(channel, listeners.get(channel).filter((other) => other !== handler));
+      },
+    },
+  };
   const ctx = { cwd: CWD, hasUI: true, isIdle: () => state.idle, ui: { notify: (text, level) => notices.push([text, level]) } };
   const userSaves = (path, content) => {
     fs.set(path, content);
@@ -84,7 +108,11 @@ function fake(options = {}) {
     fs.set(`${dir}/answers.log`, `${fs.get(`${dir}/answers.log`) ?? ""}${query}\n`);
     watchers.get(`${dir}/answers.log`)();
   };
-  return { deps, fs, calls, sent, notices, state, pi, ctx, userSaves, userSubmits, quitEditor, commands, watchers };
+  /** The `documents` events so far, and the latest list. */
+  const lists = () => emitted.filter((event) => event.channel === "doc-review:documents").map((event) => event.data.documents);
+  const results = () => emitted.filter((event) => event.channel === "doc-review:form-result").map((event) => event.data);
+  const form = (data) => pi.events.emit("doc-review:form", data);
+  return { deps, fs, calls, sent, notices, state, pi, ctx, userSaves, userSubmits, quitEditor, commands, watchers, emitted, listeners, timers, lists, results, form };
 }
 
 /** The words a POSIX shell splits `line` into, without running it. */
@@ -396,6 +424,261 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
 
   const none = fake({ installed: ["nvim"], files: { "/repo/page.html": "<p>x</p>" } });
   await assert.rejects(createDocReview(none.pi, none.deps).show(CWD, ["page.html"], "Look"), /needs Chawan \(cha\) on PATH/);
+}
+
+// The document contract: `documents` lists everything shown, in full, on every change.
+{
+  const WEB = "/tmp/review-2";
+  const t = fake({ dirs: [SCRATCH, WEB], files: { "/repo/a.md": "A", "/repo/report.html": "<h1>v1</h1>" } });
+  const review = createDocReview(t.pi, t.deps);
+  review.setContext(t.ctx);
+  assert.equal(t.emitted.length, 0, "nothing is published before a document is shown");
+
+  await review.show(CWD, ["a.md"], "Read the spec");
+  assert.deepEqual(t.emitted.at(-1), {
+    channel: "doc-review:documents",
+    data: {
+      version: 1,
+      documents: [{ id: "doc-1", path: "/repo/a.md", kind: "text", display: "a.md", reason: "Read the spec", revision: 1, onScreen: true }],
+    },
+  });
+  await review.show(CWD, ["report.html"], "Read the report");
+  assert.deepEqual(
+    t.lists().at(-1),
+    [
+      { id: "doc-1", path: "/repo/a.md", kind: "text", display: "a.md", reason: "Read the spec", revision: 1, onScreen: true },
+      { id: "doc-2", path: "/repo/report.html", kind: "html", display: "report.html", reason: "Read the report", revision: 1, onScreen: true },
+    ],
+    "the full list is sent, not a delta",
+  );
+  assert.ok(Object.keys(t.lists().at(-1)[0]).every((key) => key !== "seen"), "internal state stays out of the event");
+
+  // Showing a document again keeps its id and reason-updates it; the revision moves only if the file changed.
+  const count = t.lists().length;
+  await review.show(CWD, ["a.md"], "Read again");
+  assert.equal(t.lists().at(-1).find((doc) => doc.path === "/repo/a.md").id, "doc-1");
+  assert.equal(t.lists().at(-1).find((doc) => doc.path === "/repo/a.md").revision, 1);
+  assert.equal(t.lists().at(-1).at(-1).path, "/repo/a.md", "the document shown last is the newest");
+  assert.equal(t.lists().length, count + 1);
+
+  // The agent's change bumps the revision of text and HTML; an unchanged file does not publish.
+  const before = t.lists().length;
+  review.agentWrote("/repo/a.md");
+  assert.equal(t.lists().length, before, "an unchanged document publishes nothing");
+  t.fs.set("/repo/a.md", "A2");
+  review.agentWrote("/repo/a.md");
+  assert.equal(t.lists().at(-1).find((doc) => doc.id === "doc-1").revision, 2);
+  t.fs.set("/repo/report.html", "<h1>v2</h1>");
+  review.agentWrote("/repo/report.html");
+  assert.equal(t.lists().at(-1).find((doc) => doc.id === "doc-2").revision, 2);
+
+  // A shell command that changes files bumps them all in one event.
+  t.fs.set("/repo/a.md", "A3");
+  t.fs.set("/repo/report.html", "<h1>v3</h1>");
+  const beforeShell = t.lists().length;
+  review.refreshAfterShell();
+  assert.equal(t.lists().length, beforeShell + 1);
+  assert.equal(t.lists().at(-1).find((doc) => doc.id === "doc-1").revision, 3);
+  assert.equal(t.lists().at(-1).find((doc) => doc.id === "doc-2").revision, 3);
+
+  // The user's save changes the document too.
+  t.userSaves("/repo/a.md", "A4");
+  assert.equal(t.lists().at(-1).find((doc) => doc.id === "doc-1").revision, 4);
+
+  // Closing a pane marks its documents off screen; the other pane's stay on. The user closing the editor is noticed by the pane check.
+  assert.equal(t.timers.filter((timer) => timer.running).length, 1, "one pane check runs while documents are on screen");
+  assert.equal(t.timers[0].ms, 1000);
+  t.quitEditor();
+  t.timers.at(-1).tick();
+  assert.deepEqual(t.lists().at(-1).map((doc) => [doc.id, doc.onScreen]), [["doc-2", true], ["doc-1", false]]);
+  const afterClose = t.lists().length;
+  t.timers.at(-1).tick();
+  assert.equal(t.lists().length, afterClose, "a pane check that finds nothing new publishes nothing");
+  t.state.browserUp = false;
+  t.timers.at(-1).tick();
+  assert.ok(t.lists().at(-1).every((doc) => !doc.onScreen));
+  assert.equal(t.timers.filter((timer) => timer.running).length, 0, "the pane check stops once nothing is on screen");
+
+  // Showing again after the panes closed puts the document back on screen under the same id.
+  await review.show(CWD, ["a.md"], "Back again");
+  assert.deepEqual(t.lists().at(-1).map((doc) => [doc.id, doc.onScreen]), [["doc-2", false], ["doc-1", true]]);
+  assert.equal(t.timers.filter((timer) => timer.running).length, 1);
+
+  // Shutdown publishes an empty list, stops the pane check, and leaves the existing close behaviour alone.
+  review.shutdown();
+  assert.deepEqual(t.emitted.at(-1), { channel: "doc-review:documents", data: { version: 1, documents: [] } });
+  assert.equal(t.timers.filter((timer) => timer.running).length, 0);
+  assert.equal(review.viewer, undefined, "the panes close as before");
+  assert.equal(review.browser, undefined);
+  assert.equal(review.docs.size, 0);
+}
+
+// A pane replaced by a relaunch lists the documents it no longer holds as off screen.
+{
+  const t = fake({ files: { "/repo/a.md": "A", "/repo/b.md": "B" } });
+  const review = createDocReview(t.pi, t.deps);
+  await review.show(CWD, ["a.md"], "A");
+  t.quitEditor();
+  await review.show(CWD, ["b.md"], "B");
+  assert.deepEqual(t.lists().at(-1).map((doc) => [doc.display, doc.onScreen]), [["a.md", false], ["b.md", true]]);
+}
+
+// A show that finishes after shutdown lists nothing, so the empty list stays the last one and no pane check restarts.
+{
+  const t = fake({ files: { "/repo/a.md": "A" } });
+  const review = createDocReview(t.pi, t.deps);
+  let release;
+  t.deps.sleep = () => new Promise((done) => (release = done));
+  t.deps.pidAlive = () => false;
+  const pending = review.show(CWD, ["a.md"], "Read");
+  await new Promise((done) => setImmediate(done));
+  review.shutdown();
+  t.deps.pidAlive = (pid) => pid === 4242;
+  release();
+  await pending;
+  assert.deepEqual(t.emitted.at(-1), { channel: "doc-review:documents", data: { version: 1, documents: [] } });
+  assert.equal(t.timers.filter((timer) => timer.running).length, 0);
+}
+
+// The list keeps the 32 most recently shown documents.
+{
+  const files = Object.fromEntries(Array.from({ length: 34 }, (_, index) => [`/repo/d${index}.md`, String(index)]));
+  const t = fake({ files });
+  const review = createDocReview(t.pi, t.deps);
+  for (let index = 0; index < 34; index++) await review.show(CWD, [`d${index}.md`], "Read");
+  const list = t.lists().at(-1);
+  assert.equal(list.length, 32);
+  assert.equal(list[0].display, "d2.md", "the oldest are dropped");
+  assert.equal(list.at(-1).display, "d33.md");
+}
+
+// A Mini SDD auto-open publishes its phase files with the auto-open reason, without a show_doc call.
+{
+  const t = fake({ files: { [`${SPEC_DIR}/spec.md`]: "Status: proposed\n", [`${SPEC_DIR}/decision.md`]: "# D" } });
+  const handlers = new Map();
+  docReview({ ...t.pi, on: (event, handler) => handlers.set(event, handler), registerTool: () => {} }, t.deps);
+  await handlers.get("tool_result")({ toolName: "write", isError: false, input: { path: `${SPEC_DIR}/spec.md` } }, t.ctx);
+  assert.deepEqual(t.lists().at(-1).map((doc) => [doc.display, doc.reason, doc.onScreen]), [
+    ["docs/specs/2026-10-16-review/decision.md", "Spec proposed for approval", true],
+    ["docs/specs/2026-10-16-review/spec.md", "Spec proposed for approval", true],
+  ]);
+}
+
+// Outside Herdr nothing opens and nothing is published.
+{
+  const t = fake({ paneId: undefined, files: { "/repo/a.md": "A" } });
+  await createDocReview(t.pi, t.deps).show(CWD, ["a.md"], "Read");
+  assert.equal(t.emitted.length, 0);
+  assert.equal(t.timers.length, 0);
+}
+
+// A form event is delivered exactly like a Chawan submission of the same fields, and answered on the result event.
+{
+  const WEB = "/tmp/review-2";
+  const t = fake({ dirs: [SCRATCH, WEB], files: { "/repo/report.html": "<form>", "/repo/a.md": "A" } });
+  const review = createDocReview(t.pi, t.deps);
+  review.setContext(t.ctx);
+  t.pi.events.on("doc-review:form", review.onForm);
+  await review.show(CWD, ["report.html", "a.md"], "Read");
+  const html = t.lists().at(-1).find((doc) => doc.kind === "html").id;
+  const text = t.lists().at(-1).find((doc) => doc.kind === "text").id;
+
+  // The Chawan path for the same fields, idle.
+  t.userSubmits(WEB, "q1=%E6%96%B0+skill&note=a%26b+c");
+  const chawan = t.sent.pop();
+  t.form({ version: 1, id: html, answerId: "a1", fields: [["q1", "新 skill"], ["note", "a&b c"]] });
+  assert.equal(t.sent.length, 1);
+  assert.deepEqual(t.sent[0], chawan, "same message and same options as the CGI path, idle");
+  assert.deepEqual(t.sent[0].options, { triggerTurn: true });
+  assert.deepEqual(t.results().at(-1), { version: 1, id: html, answerId: "a1", accepted: true });
+
+  // Busy: steered.
+  t.state.idle = false;
+  t.sent.length = 0;
+  t.userSubmits(WEB, "q2=yes");
+  const chawanBusy = t.sent.pop();
+  t.form({ version: 1, id: html, answerId: "a2", fields: [["q2", "yes"]] });
+  assert.deepEqual(t.sent[0], chawanBusy, "same message and same options as the CGI path, busy");
+  assert.equal(t.sent[0].options.deliverAs, "steer");
+  t.state.idle = true;
+  t.sent.length = 0;
+
+  // A repeated answerId replays the result and delivers nothing more.
+  const results = t.results().length;
+  t.form({ version: 1, id: html, answerId: "a2", fields: [["q2", "yes"]] });
+  assert.equal(t.sent.length, 0, "a replayed answer is not delivered twice");
+  assert.equal(t.results().length, results + 1);
+  assert.deepEqual(t.results().at(-1), { version: 1, id: html, answerId: "a2", accepted: true }, "the first result is replayed");
+  t.form({ version: 1, id: "doc-unknown", answerId: "a2", fields: [["q2", "yes"]] });
+  assert.equal(t.sent.length, 0);
+  assert.equal(t.results().at(-1).accepted, false, "the same answerId for another document is refused");
+
+  // An unknown id is closed, and is remembered like any other result.
+  t.form({ version: 1, id: "nope", answerId: "a3", fields: [["x", "y"]] });
+  assert.deepEqual(t.results().at(-1), { version: 1, id: "nope", answerId: "a3", accepted: false, reason: "closed" });
+  assert.equal(t.sent.length, 0);
+
+  // Text documents take no forms; bad payloads are refused; an empty form is dropped as a Chawan one is.
+  t.form({ version: 1, id: text, answerId: "a4", fields: [["x", "y"]] });
+  assert.equal(t.results().at(-1).reason, "invalid");
+  t.form({ version: 2, id: html, answerId: "a5", fields: [["x", "y"]] });
+  assert.equal(t.results().at(-1).reason, "invalid");
+  t.form({ version: 1, id: html, answerId: "a6", fields: [["x"]] });
+  assert.equal(t.results().at(-1).reason, "invalid");
+  t.form({ version: 1, id: html, answerId: "a7", fields: "x=y" });
+  assert.equal(t.results().at(-1).reason, "invalid");
+  t.form({ version: 1, id: html, answerId: "a8", fields: [] });
+  assert.deepEqual(t.results().at(-1), { version: 1, id: html, answerId: "a8", accepted: false, reason: "empty" });
+  assert.equal(t.sent.length, 0, "refused forms deliver nothing");
+  const refused = t.results().length;
+  t.form(null);
+  t.form({ version: 1, fields: [] });
+  t.form({ version: 1, id: html, answerId: 7, fields: [] });
+  assert.equal(t.results().length, refused, "a payload that cannot be answered is ignored");
+
+  // A delivery that throws is reported as not accepted.
+  t.pi.sendMessage = () => {
+    throw new Error("boom");
+  };
+  t.form({ version: 1, id: html, answerId: "a9", fields: [["x", "y"]] });
+  assert.deepEqual(t.results().at(-1), { version: 1, id: html, answerId: "a9", accepted: false, reason: "delivery failed: boom" });
+
+  // After shutdown the document is unknown.
+  review.shutdown();
+  t.form({ version: 1, id: html, answerId: "a10", fields: [["x", "y"]] });
+  assert.equal(t.results().at(-1).reason, "closed");
+}
+
+// The remembered answers are bounded.
+{
+  const t = fake({ files: { "/repo/p.html": "<form>" } });
+  const review = createDocReview(t.pi, t.deps);
+  await review.show(CWD, ["p.html"], "Read");
+  const id = t.lists().at(-1)[0].id;
+  for (let index = 0; index < 300; index++) review.onForm({ version: 1, id, answerId: `n${index}`, fields: [["x", String(index)]] });
+  assert.equal(t.sent.length, 300);
+  review.onForm({ version: 1, id, answerId: "n299", fields: [["x", "299"]] });
+  assert.equal(t.sent.length, 300, "a recent answer still replays");
+}
+
+// The extension listens for forms from start-up and stops, with everything else, at shutdown.
+{
+  const t = fake({ files: { "/repo/p.html": "<form>" } });
+  const handlers = new Map();
+  docReview({ ...t.pi, on: (event, handler) => handlers.set(event, handler), registerTool: (tool) => handlers.set("tool", tool) }, t.deps);
+  assert.equal(t.listeners.get("doc-review:form").length, 1);
+  handlers.get("session_start")?.({}, t.ctx);
+  await handlers.get("tool").execute("call", { paths: ["p.html"], reason: "Read" }, undefined, undefined, t.ctx);
+  const id = t.lists().at(-1)[0].id;
+  t.form({ version: 1, id, answerId: "e1", fields: [["x", "y"]] });
+  assert.equal(t.sent.length, 1);
+  assert.equal(t.results().at(-1).accepted, true);
+  handlers.get("session_shutdown")({}, t.ctx);
+  assert.equal(t.listeners.get("doc-review:form").length, 0, "the form listener is removed at shutdown");
+  assert.equal(t.timers.filter((timer) => timer.running).length, 0, "no pane check outlives the session");
+  t.form({ version: 1, id, answerId: "e2", fields: [["x", "y"]] });
+  assert.equal(t.sent.length, 1, "a form after shutdown reaches nobody");
+  assert.deepEqual(t.emitted.filter((event) => event.channel === "doc-review:documents").at(-1).data.documents, []);
 }
 
 console.log("pi-doc-review: ok");

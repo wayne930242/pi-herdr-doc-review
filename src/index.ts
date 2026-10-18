@@ -19,11 +19,17 @@
  * is `cgi-bin:pi-answer` sends its fields to the agent the same way a save does: Chawan runs that
  * local CGI script from the scratch directory, which appends the query string to an answers file.
  * Chawan blocks a POST from a `file:` page to `cgi-bin:`, so the form submits with GET.
+ *
+ * Other viewers (a browser page, for one) read the same documents through pi's event bus:
+ * `doc-review:documents` carries the full list on every change, and a `doc-review:form` event
+ * delivers form answers to the agent exactly as a Chawan submission does, with its result on
+ * `doc-review:form-result`.
  */
 
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -41,6 +47,17 @@ export const HTML_FILE = /\.html?$/i;
 export const BROWSER = "cha";
 /** The local CGI script an HTML form names as `action="cgi-bin:pi-answer"` to send its fields to the agent. */
 export const ANSWER_CGI = "pi-answer";
+/** The document contract on pi's event bus; every payload carries `version`. */
+export const DOCUMENTS_EVENT = "doc-review:documents";
+export const FORM_EVENT = "doc-review:form";
+export const FORM_RESULT_EVENT = "doc-review:form-result";
+export const CONTRACT_VERSION = 1;
+/** The list keeps the most recently shown documents. */
+export const MAX_DOCUMENTS = 32;
+/** Form results remembered so a repeated `answerId` replays instead of delivering twice. */
+export const MAX_REMEMBERED_ANSWERS = 256;
+/** How often the panes are checked, so a pane the user closed is reported within a second or so. */
+export const PANE_CHECK_MS = 1000;
 const READY_WAIT_MS = 5000;
 const READY_POLL_MS = 100;
 
@@ -66,6 +83,9 @@ export interface DocReviewDeps {
   realpath: (path: string) => string;
   watch: (path: string, onChange: () => void) => () => void;
   sleep: (ms: number) => Promise<void>;
+  /** Calls `tick` every `ms` until the returned function is called. */
+  every: (ms: number, tick: () => void) => () => void;
+  newId: () => string;
 }
 
 const defaultDeps: DocReviewDeps = {
@@ -103,6 +123,12 @@ const defaultDeps: DocReviewDeps = {
     return () => unwatchFile(path, listener);
   },
   sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
+  every: (ms, tick) => {
+    const timer = setInterval(tick, ms);
+    timer.unref();
+    return () => clearInterval(timer);
+  },
+  newId: randomUUID,
 };
 
 interface Viewer {
@@ -129,6 +155,32 @@ interface Browser {
 interface ShownDoc {
   display: string;
   snapshot: string;
+}
+
+type DocKind = "html" | "text";
+
+/** A document as the event bus lists it. */
+export interface PublishedDocument {
+  id: string;
+  path: string;
+  kind: DocKind;
+  display: string;
+  reason: string;
+  revision: number;
+  onScreen: boolean;
+}
+
+interface DocEntry extends PublishedDocument {
+  /** The content last published, so a revision bumps only when the file really changed. */
+  seen: string;
+}
+
+export interface FormResult {
+  version: typeof CONTRACT_VERSION;
+  id: string;
+  answerId: string;
+  accepted: boolean;
+  reason?: string;
 }
 
 export interface ShowResult {
@@ -250,6 +302,15 @@ function feedbackMessage(display: string, diff: string): string {
   return `User edited ${display}:\n\`\`\`diff\n${body}\`\`\``;
 }
 
+/** The agent's view of one submitted form; the Chawan CGI path and the `form` event both build it here. */
+export function formMessage(fields: Iterable<readonly [string, string]>): string {
+  const lines = [...fields].map(([name, value]) => `- ${name}: ${value}`);
+  return `User submitted a form in the HTML review pane:\n${lines.join("\n") || "(no fields)"}`;
+}
+
+const isFieldList = (value: unknown): value is [string, string][] =>
+  Array.isArray(value) && value.every((field) => Array.isArray(field) && field.length === 2 && field.every((part) => typeof part === "string"));
+
 export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultDeps) {
   let viewer: Viewer | undefined;
   let browser: Browser | undefined;
@@ -257,6 +318,12 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
   const shown = new Map<string, ShownDoc>();
   /** HTML pages on screen, with the content the browser last loaded. */
   const pages = new Map<string, string>();
+  /** Every document shown, by real path, oldest first; this is what the `documents` event lists. */
+  const docs = new Map<string, DocEntry>();
+  const answers = new Map<string, FormResult>();
+  let stopPaneCheck: (() => void) | undefined;
+  /** Set at shutdown: a show still waiting for its pane then lists nothing, so `[]` stays the last list. */
+  let closed = false;
 
   const alive = (ready: string): boolean => {
     const pid = Number(deps.readFile(ready)?.trim());
@@ -309,6 +376,70 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     if (ctx?.hasUI) ctx.ui.notify(`${notice} go to the agent with your next message.`, "info");
   };
 
+  const publish = (): void => {
+    const documents = [...docs.values()].map(({ seen: _seen, ...document }) => document);
+    pi.events.emit(DOCUMENTS_EVENT, { version: CONTRACT_VERSION, documents });
+    const onScreen = documents.some((document) => document.onScreen);
+    if (onScreen && !stopPaneCheck) stopPaneCheck = deps.every(PANE_CHECK_MS, checkPanes);
+    if (!onScreen && stopPaneCheck) {
+      stopPaneCheck();
+      stopPaneCheck = undefined;
+    }
+  };
+
+  /** Marks the documents of the given pane kinds as no longer on screen, announcing it once. */
+  const dropScreen = (kinds: DocKind[]): void => {
+    let changed = false;
+    for (const entry of docs.values()) {
+      if (!entry.onScreen || !kinds.includes(entry.kind)) continue;
+      entry.onScreen = false;
+      changed = true;
+    }
+    if (changed) publish();
+  };
+
+  function checkPanes(): void {
+    dropScreen([...(viewerAlive() ? [] : ["text" as const]), ...(browserAlive() ? [] : ["html" as const])]);
+  }
+
+  /** Lists documents that were just opened: new ones get an id, known ones keep theirs. */
+  const register = (group: { absolute: string; content: string; display: string }[], kind: DocKind, reason: string): void => {
+    if (closed) return;
+    for (const doc of group) {
+      const known = docs.get(doc.absolute);
+      docs.delete(doc.absolute);
+      docs.set(doc.absolute, {
+        id: known?.id ?? deps.newId(),
+        path: doc.absolute,
+        kind,
+        display: doc.display,
+        reason,
+        revision: known ? known.revision + (known.seen === doc.content ? 0 : 1) : 1,
+        onScreen: true,
+        seen: doc.content,
+      });
+    }
+    for (const oldest of docs.keys()) {
+      if (docs.size <= MAX_DOCUMENTS) break;
+      docs.delete(oldest);
+    }
+    publish();
+  };
+
+  /** A listed document whose file changed gets the next revision; one event covers all of them. */
+  const bump = (paths: Iterable<string>): void => {
+    let changed = false;
+    for (const path of paths) {
+      const entry = docs.get(path);
+      const content = entry && deps.readFile(path);
+      if (!entry || content === undefined || content === entry.seen) continue;
+      entry.revision += 1;
+      entry.seen = content;
+      changed = true;
+    }
+    if (changed) publish();
+  };
+
   const onSave = (path: string, dir: string): void => {
     const doc = shown.get(path);
     if (!doc) return;
@@ -320,6 +451,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     if (diff.status !== 0 && diff.status !== 1) throw new Error(`diff failed: ${diff.stderr.trim()}`);
     doc.snapshot = content;
     deliver(feedbackMessage(doc.display, diff.stdout), `Your edits to ${doc.display}`);
+    bump([path]);
   };
 
   const readSaves = (): void => {
@@ -341,6 +473,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     const current = viewer;
     viewer = undefined;
     shown.clear();
+    dropScreen(["text"]);
     if (!current) return;
     current.stopWatch();
     // The editor quits only without unsaved edits, and removes its scratch directory as it leaves.
@@ -354,16 +487,14 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     const log = deps.readFile(browser.answers) ?? "";
     const fresh = log.slice(browser.answersOffset);
     browser.answersOffset = log.length;
-    for (const line of fresh.split("\n").filter(Boolean)) {
-      const fields = [...new URLSearchParams(line)].map(([name, value]) => `- ${name}: ${value}`);
-      deliver(`User submitted a form in the HTML review pane:\n${fields.join("\n") || "(no fields)"}`, "Your form answers", true);
-    }
+    for (const line of fresh.split("\n").filter(Boolean)) deliver(formMessage(new URLSearchParams(line)), "Your form answers", true);
   };
 
   const closeBrowser = (): void => {
     const current = browser;
     browser = undefined;
     pages.clear();
+    dropScreen(["html"]);
     if (!current) return;
     current.stopWatch();
     // The pane's shell removes the scratch directory once Chawan exits.
@@ -473,7 +604,15 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     if (!deps.paneId) return { opened: [], text: `Not running inside Herdr, so no review pane opened. Tell the user to read: ${names}` };
     const texts = docs.filter((doc) => !HTML_FILE.test(doc.absolute));
     const htmls = docs.filter((doc) => HTML_FILE.test(doc.absolute));
-    const fresh = [...(texts.length > 0 ? await showText(cwd, texts) : []), ...(htmls.length > 0 ? await showHtml(cwd, htmls) : [])];
+    const fresh: unknown[] = [];
+    if (texts.length > 0) {
+      fresh.push(...(await showText(cwd, texts)));
+      register(texts, "text", reason);
+    }
+    if (htmls.length > 0) {
+      fresh.push(...(await showHtml(cwd, htmls)));
+      register(htmls, "html", reason);
+    }
     if (fresh.length > 0) herdr("notification", "show", "Document ready for review", "--body", `${reason}: ${names}`, "--sound", "request");
     const list = (group: typeof docs) => group.map((doc) => doc.display).join(", ");
     const opened = [
@@ -500,6 +639,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
   /** After the agent changes a shown document, the version it saw is the new one, and the pane reloads it. */
   const agentWrote = (path: string): void => {
     reloadPages([path]);
+    bump([path]);
     const doc = shown.get(path);
     if (!doc) return;
     doc.snapshot = deps.readFile(path) ?? doc.snapshot;
@@ -508,13 +648,68 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
 
   const refreshAfterShell = (): void => {
     reloadPages([...pages.keys()]);
+    bump(docs.keys());
     if (shown.size === 0) return;
     for (const [path, doc] of shown) doc.snapshot = deps.readFile(path) ?? doc.snapshot;
     reload();
   };
 
+  /** Delivers a form answered in another viewer exactly as a Chawan submission is delivered; replies on the result event. */
+  const onForm = (data: unknown): void => {
+    if (typeof data !== "object" || data === null) return;
+    const { version, id, answerId, fields } = data as Record<string, unknown>;
+    if (typeof id !== "string" || typeof answerId !== "string") return;
+    const result = (accepted: boolean, reason?: string): FormResult => ({
+      version: CONTRACT_VERSION,
+      id,
+      answerId,
+      accepted,
+      ...(reason === undefined ? {} : { reason }),
+    });
+    const remembered = answers.get(answerId);
+    if (remembered) {
+      // A repeated answerId never delivers again; it gets the first result back.
+      pi.events.emit(FORM_RESULT_EVENT, remembered.id === id ? { ...remembered } : result(false, "invalid"));
+      return;
+    }
+    const decide = (): FormResult => {
+      const entry = [...docs.values()].find((doc) => doc.id === id);
+      if (version !== CONTRACT_VERSION || !isFieldList(fields)) return result(false, "invalid");
+      if (!entry) return result(false, "closed");
+      if (entry.kind !== "html") return result(false, "invalid");
+      // A Chawan submission without fields never reaches the agent, so this one does not either.
+      if (fields.length === 0) return result(false, "empty");
+      try {
+        deliver(formMessage(fields), "Your form answers", true);
+      } catch (error) {
+        return result(false, `delivery failed: ${(error as Error).message}`);
+      }
+      return result(true);
+    };
+    const decided = decide();
+    answers.set(answerId, decided);
+    for (const oldest of answers.keys()) {
+      if (answers.size <= MAX_REMEMBERED_ANSWERS) break;
+      answers.delete(oldest);
+    }
+    pi.events.emit(FORM_RESULT_EVENT, decided);
+  };
+
+  /** Session end: the list empties for every viewer and the panes close as they do today. */
+  const shutdown = (): void => {
+    closed = true;
+    docs.clear();
+    answers.clear();
+    closeViewer();
+    closeBrowser();
+    publish();
+  };
+
   return {
     show,
+    docs,
+    onForm,
+    shutdown,
     get viewer() {
       return viewer;
     },
@@ -585,8 +780,10 @@ export default function docReview(pi: ExtensionAPI, deps: DocReviewDeps = defaul
     }
   });
 
+  const stopForms = pi.events.on(FORM_EVENT, review.onForm);
+
   pi.on("session_shutdown", () => {
-    review.closeViewer();
-    review.closeBrowser();
+    stopForms();
+    review.shutdown();
   });
 }
