@@ -355,6 +355,8 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
     `start.startup-script='(0, eval)(readFile("${WEB}/review.js"))'`,
     "-o",
     `external.cgi-dir=['${WEB}', '$CHA_LIBEXEC_DIR/cgi-bin']`,
+    "-o",
+    "buffer.images=true",
     "--",
     "/repo/report.html",
   ]);

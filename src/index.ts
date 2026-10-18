@@ -541,7 +541,8 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     const startup = `start.startup-script='(0, eval)(readFile(${JSON.stringify(script)}))'`;
     // The scratch dir serves the answer script; Chawan's own directory serves file: and its other schemes.
     const cgiDirs = `external.cgi-dir=['${dir}', '$CHA_LIBEXEC_DIR/cgi-bin']`;
-    const inner = `echo $$ > ${shellQuote(ready)}; ${BROWSER} -o ${shellQuote(startup)} -o ${shellQuote(cgiDirs)} -- ${paths.map(shellQuote).join(" ")}; rm -rf ${shellQuote(dir)}`;
+    // Chawan loads no images unless buffer.images is on; it then draws them with the terminal's kitty or sixel support.
+    const inner = `echo $$ > ${shellQuote(ready)}; ${BROWSER} -o ${shellQuote(startup)} -o ${shellQuote(cgiDirs)} -o buffer.images=true -- ${paths.map(shellQuote).join(" ")}; rm -rf ${shellQuote(dir)}`;
     // `exit` closes the pane when the user quits Chawan; the next HTML show opens a fresh one.
     herdr("pane", "run", pane, `sh -c ${shellQuote(inner)}; exit`);
     herdr("pane", "rename", pane, "html review");
