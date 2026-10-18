@@ -23,7 +23,8 @@
  * Other viewers (a browser page, for one) read the same documents through pi's event bus:
  * `doc-review:documents` carries the full list on every change, and a `doc-review:form` event
  * delivers form answers to the agent exactly as a Chawan submission does, with its result on
- * `doc-review:form-result`.
+ * `doc-review:form-result`. A viewer that starts late asks with `doc-review:documents-request`
+ * and gets the current list again on `doc-review:documents`.
  */
 
 import { Type } from "@earendil-works/pi-ai";
@@ -51,6 +52,7 @@ export const ANSWER_CGI = "pi-answer";
 export const DOCUMENTS_EVENT = "doc-review:documents";
 export const FORM_EVENT = "doc-review:form";
 export const FORM_RESULT_EVENT = "doc-review:form-result";
+export const DOCUMENTS_REQUEST_EVENT = "doc-review:documents-request";
 export const CONTRACT_VERSION = 1;
 /** The list keeps the most recently shown documents. */
 export const MAX_DOCUMENTS = 32;
@@ -376,8 +378,10 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     if (ctx?.hasUI) ctx.ui.notify(`${notice} go to the agent with your next message.`, "info");
   };
 
+  const listed = (): Omit<DocEntry, "seen">[] => [...docs.values()].map(({ seen: _seen, ...document }) => document);
+
   const publish = (): void => {
-    const documents = [...docs.values()].map(({ seen: _seen, ...document }) => document);
+    const documents = listed();
     pi.events.emit(DOCUMENTS_EVENT, { version: CONTRACT_VERSION, documents });
     const onScreen = documents.some((document) => document.onScreen);
     if (onScreen && !stopPaneCheck) stopPaneCheck = deps.every(PANE_CHECK_MS, checkPanes);
@@ -695,6 +699,13 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     pi.events.emit(FORM_RESULT_EVENT, decided);
   };
 
+  /** A viewer that started late asks for the list: it is sent again as it stands, changing nothing else. */
+  const onRequest = (data: unknown): void => {
+    if (closed || typeof data !== "object" || data === null) return;
+    if ((data as Record<string, unknown>).version !== CONTRACT_VERSION) return;
+    pi.events.emit(DOCUMENTS_EVENT, { version: CONTRACT_VERSION, documents: listed() });
+  };
+
   /** Session end: the list empties for every viewer and the panes close as they do today. */
   const shutdown = (): void => {
     closed = true;
@@ -709,6 +720,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     show,
     docs,
     onForm,
+    onRequest,
     shutdown,
     get viewer() {
       return viewer;
@@ -781,9 +793,11 @@ export default function docReview(pi: ExtensionAPI, deps: DocReviewDeps = defaul
   });
 
   const stopForms = pi.events.on(FORM_EVENT, review.onForm);
+  const stopRequests = pi.events.on(DOCUMENTS_REQUEST_EVENT, review.onRequest);
 
   pi.on("session_shutdown", () => {
     stopForms();
+    stopRequests();
     review.shutdown();
   });
 }

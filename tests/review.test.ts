@@ -681,4 +681,63 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   assert.deepEqual(t.emitted.filter((event) => event.channel === "doc-review:documents").at(-1).data.documents, []);
 }
 
+// A viewer that starts late asks for the list and gets exactly the last one published.
+{
+  const t = fake({ dirs: [SCRATCH, "/tmp/review-2"], files: { "/repo/a.md": "A", "/repo/p.html": "<h1>x</h1>" } });
+  const handlers = new Map();
+  docReview({ ...t.pi, on: (event, handler) => handlers.set(event, handler), registerTool: (tool) => handlers.set("tool", tool) }, t.deps);
+  const request = (data) => t.pi.events.emit("doc-review:documents-request", data);
+  assert.equal(t.listeners.get("doc-review:documents-request").length, 1);
+  handlers.get("session_start")?.({}, t.ctx);
+
+  // Nothing open: the empty list.
+  request({ version: 1 });
+  assert.deepEqual(t.emitted.at(-1), { channel: "doc-review:documents", data: { version: 1, documents: [] } });
+
+  await handlers.get("tool").execute("call", { paths: ["a.md", "p.html"], reason: "Read" }, undefined, undefined, t.ctx);
+  const published = t.lists().at(-1);
+  const before = t.lists().length;
+  const running = () => t.timers.filter((timer) => timer.running).length;
+  assert.equal(running(), 1);
+  request({ version: 1 });
+  assert.equal(t.lists().length, before + 1, "one list per request");
+  assert.deepEqual(t.lists().at(-1), published, "the list is the one last published");
+  assert.equal(running(), 1, "a request neither starts nor stops the pane check");
+  assert.equal(t.sent.length, 0);
+
+  // Other versions and shapes are ignored.
+  for (const data of [{ version: 2 }, { version: "1" }, {}, undefined, null, "1"]) request(data);
+  assert.equal(t.lists().length, before + 1);
+
+  // A document whose pane closed stays listed, off screen, and the request repeats exactly that list.
+  t.quitEditor();
+  t.timers.at(-1).tick();
+  const closed = t.lists().at(-1);
+  assert.equal(closed.filter((doc) => !doc.onScreen).length, 1);
+  const afterClose = t.lists().length;
+  request({ version: 1 });
+  assert.equal(t.lists().length, afterClose + 1);
+  assert.deepEqual(t.lists().at(-1), closed);
+  assert.equal(running(), 1, "the other pane is still checked");
+
+  // After shutdown the listener is gone.
+  handlers.get("session_shutdown")({}, t.ctx);
+  assert.equal(t.listeners.get("doc-review:documents-request").length, 0, "the request listener is removed at shutdown");
+  const after = t.lists().length;
+  request({ version: 1 });
+  assert.equal(t.lists().length, after, "no list is published after shutdown");
+  assert.deepEqual(t.lists().at(-1), []);
+}
+
+// The handler itself publishes nothing once the session is over, even if it is still called.
+{
+  const t = fake({ files: { "/repo/a.md": "A" } });
+  const review = createDocReview(t.pi, t.deps);
+  await review.show(CWD, ["a.md"], "Read");
+  review.shutdown();
+  const count = t.lists().length;
+  review.onRequest({ version: 1 });
+  assert.equal(t.lists().length, count);
+}
+
 console.log("pi-doc-review: ok");
