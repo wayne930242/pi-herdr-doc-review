@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import docReview, { createDocReview, MAX_DIFF_CHARS } from "../src/index.ts";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import docReview, { createDocReview, createPageServer, MAX_DIFF_CHARS } from "../src/index.ts";
 
 const SCRATCH = "/tmp/review-1";
 const CONTROL = `${SCRATCH}/commands.vim`;
@@ -17,7 +21,7 @@ function fake(options = {}) {
   const sent = [];
   const notices = [];
   const watchers = new Map();
-  const state = { editorUp: false, browserUp: false, unsaved: 0, splits: 0, removed: [], idle: true };
+  const state = { editorUp: false, browserUp: false, unsaved: 0, splits: 0, removed: [], idle: true, listed: true, servers: [] };
   const installed = options.installed ?? ["nvim", "vim", "cha"];
   const dirs = options.dirs ?? [SCRATCH];
   let made = 0;
@@ -32,22 +36,35 @@ function fake(options = {}) {
     paneId,
     herdr: "herdr",
     editor: options.editor,
+    browser: options.browser,
+    servePages: async (onAnswer, allowed) => {
+      const server = { base: `http://127.0.0.1:4000/tok${state.servers.length + 1}`, reloads: [], closed: false, onAnswer, allowed };
+      state.servers.push(server);
+      return { base: server.base, reload: (path) => server.reloads.push(path), close: () => (server.closed = true) };
+    },
     onPath: (command) => installed.includes(command),
     pidAlive: (pid) => (state.editorUp && pid === 4242) || (state.browserUp && pid === 5151),
     run: (command, args) => {
       calls.push([command, ...args]);
       if (command === "herdr" && args[0] === "pane" && args[1] === "split") {
         state.splits++;
+        if (state.failSplit) return { status: 1, stdout: "", stderr: "no room" };
         return { status: 0, stdout: JSON.stringify({ result: { pane: { pane_id: `w:p${state.splits + 1}` } } }), stderr: "" };
       }
       if (command === "herdr" && args[0] === "pane" && args[1] === "run") {
-        const isBrowser = args[3].includes(" cha -o ");
+        const isBrowser = args[3].includes(" cha -o ") || args[3].includes(" terminal-browser open ");
         if (isBrowser) state.browserUp = true;
         else state.editorUp = true;
         fs.set(`${lastDir}/ready`, isBrowser ? "5151\n" : "4242\n");
         return { status: 0, stdout: "", stderr: "" };
       }
+      if (command === "herdr" && args[1] === "send-keys" && args[3] === "ctrl+q") state.browserUp = false;
       if (command === "herdr") return { status: 0, stdout: "{}", stderr: "" };
+      if (command === "terminal-browser" && args[0] === "ls") {
+        const browsers = state.listed ? [{ key: "777-1", pane: { tab: "w:t1", pane: `w:p${state.splits + 1}` } }, { key: "888-1", pane: { tab: "w:t1", pane: "w:p99" } }] : [];
+        return { status: 0, stdout: JSON.stringify({ browsers }), stderr: "" };
+      }
+      if (command === "terminal-browser" && args[0] === "new-tab") return { status: 0, stdout: "{}", stderr: "" };
       if (command === "diff") {
         const before = fs.get(args[5]);
         const after = fs.get(args[6]);
@@ -425,7 +442,159 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   assert.deepEqual(t.state.removed, [SCRATCH]);
 
   const none = fake({ installed: ["nvim"], files: { "/repo/page.html": "<p>x</p>" } });
-  await assert.rejects(createDocReview(none.pi, none.deps).show(CWD, ["page.html"], "Look"), /needs Chawan \(cha\) on PATH/);
+  await assert.rejects(createDocReview(none.pi, none.deps).show(CWD, ["page.html"], "Look"), /needs terminal-browser or Chawan \(cha\) on PATH/);
+}
+
+// terminal-browser is preferred when installed: pages load from the page server, more pages open as tabs.
+{
+  const WEB = "/tmp/review-3";
+  const t = fake({ dirs: [WEB], installed: ["nvim", "cha", "terminal-browser"], files: { "/repo/report.html": "<h1>v1</h1>", "/repo/my page.html": "<p>b</p>" } });
+  const review = createDocReview(t.pi, t.deps);
+  review.setContext(t.ctx);
+  const result = await review.show(CWD, ["report.html", "my page.html"], "Read");
+  assert.match(result.text, /in Herdr pane w:p2 \(rendered by terminal-browser, view-only, one tab per page\)/);
+  const run = t.calls.find((call) => call[0] === "herdr" && call[2] === "run").at(-1);
+  const [, , inner] = shellWords(run.replace(/; exit$/, ""));
+  const [recordPid, launch, cleanUp] = inner.split("; ");
+  assert.equal(recordPid, `echo $$ > '${WEB}/ready'`);
+  assert.deepEqual(shellWords(launch), ["terminal-browser", "open", "http://127.0.0.1:4000/tok1/files/repo/report.html", "--no-merge"]);
+  assert.equal(cleanUp, `rm -rf '${WEB}'`);
+  assert.ok(![...t.fs.keys()].some((path) => path.startsWith(`${WEB}/`) && path !== `${WEB}/ready`), "no Chawan scratch files");
+  const tabs = () => t.calls.filter((call) => call[0] === "terminal-browser" && call[1] === "new-tab");
+  assert.deepEqual(tabs(), [["terminal-browser", "new-tab", "--browser", "777-1", "http://127.0.0.1:4000/tok1/files/repo/my%20page.html"]], "the second page opens as a tab of this pane's browser");
+
+  // Another page reuses the browser and the key it found; a page already open is not opened again.
+  t.fs.set("/repo/c.html", "<p>c</p>");
+  await review.show(CWD, ["c.html", "report.html"], "More");
+  assert.equal(t.state.splits, 1);
+  assert.equal(tabs().length, 2);
+  assert.equal(tabs()[1][4], "http://127.0.0.1:4000/tok1/files/repo/c.html");
+  assert.equal(t.calls.filter((call) => call[0] === "terminal-browser" && call[1] === "ls").length, 1);
+
+  // The server serves only the shown pages' directories, below them too, and nothing beside them.
+  const [server] = t.state.servers;
+  assert.equal(server.allowed("/repo/report.html"), true);
+  assert.equal(server.allowed("/repo/img/chart.png"), true);
+  assert.equal(server.allowed("/repo/.env"), false, "no dotfile");
+  assert.equal(server.allowed("/repo/.git/config"), false, "nor anything in a dot directory");
+  assert.equal(server.allowed("/etc/passwd"), false);
+  assert.equal(server.allowed("/repository/x.html"), false);
+  assert.equal(server.allowed("/repo"), false);
+
+  // A changed page reloads through the server; an unchanged one does not.
+  review.agentWrote("/repo/report.html");
+  assert.deepEqual(server.reloads, []);
+  t.fs.set("/repo/report.html", "<h1>v2</h1>");
+  review.agentWrote("/repo/report.html");
+  assert.deepEqual(server.reloads, ["/repo/report.html"]);
+
+  // A form posted to the server reaches the agent like a Chawan submission; an empty one does not.
+  server.onAnswer("q=%E6%96%B0+skill");
+  server.onAnswer("");
+  assert.equal(t.sent.length, 1);
+  assert.deepEqual(t.sent[0].options, { triggerTurn: true });
+  assert.equal(t.sent[0].message.content, "User submitted a form in the HTML review pane:\n- q: 新 skill");
+
+  // Closing sends ctrl+q to the pane and stops the server; the pane's shell removes the scratch dir.
+  review.closeBrowser();
+  assert.ok(t.calls.some((call) => call.join(" ") === "herdr pane send-keys w:p2 ctrl+q"));
+  assert.equal(server.closed, true);
+  assert.deepEqual(t.state.removed, []);
+  assert.equal(server.allowed("/repo/report.html"), false, "a closed browser's pages are no longer served");
+}
+
+// A browser the user quits stops its page server at the next pane check, not at the next show.
+{
+  const t = fake({ installed: ["terminal-browser"], files: { "/repo/a.html": "a" } });
+  const review = createDocReview(t.pi, t.deps);
+  await review.show(CWD, ["a.html"], "Look");
+  t.timers.at(-1).tick();
+  assert.equal(t.state.servers[0].closed, false, "a running browser is left alone");
+  t.state.browserUp = false;
+  t.timers.at(-1).tick();
+  assert.equal(t.state.servers[0].closed, true);
+  assert.equal(review.browser, undefined);
+  assert.ok(t.lists().at(-1).every((doc) => !doc.onScreen));
+}
+
+// A launch that fails before the pane runs stops the server it started.
+{
+  const t = fake({ installed: ["terminal-browser"], files: { "/repo/a.html": "a" } });
+  t.state.failSplit = true;
+  await assert.rejects(createDocReview(t.pi, t.deps).show(CWD, ["a.html"], "Look"), /no room/);
+  assert.equal(t.state.servers[0].closed, true);
+}
+
+// PI_HERDR_DOC_REVIEW_BROWSER picks the browser and fails fast when it cannot be used.
+{
+  const files = { "/repo/page.html": "<p>x</p>" };
+  const cha = fake({ browser: "cha", installed: ["cha", "terminal-browser"], files });
+  const result = await createDocReview(cha.pi, cha.deps).show(CWD, ["page.html"], "Look");
+  assert.match(result.text, /rendered by Chawan, view-only, one buffer per page/);
+  assert.equal(cha.state.servers.length, 0, "Chawan needs no page server");
+  const missing = fake({ browser: "terminal-browser", installed: ["cha"], files });
+  await assert.rejects(createDocReview(missing.pi, missing.deps).show(CWD, ["page.html"], "Look"), /PI_HERDR_DOC_REVIEW_BROWSER=terminal-browser, but terminal-browser is not on PATH/);
+  assert.equal(missing.state.splits, 0);
+  const other = fake({ browser: "lynx", installed: ["lynx"], files });
+  await assert.rejects(createDocReview(other.pi, other.deps).show(CWD, ["page.html"], "Look"), /=lynx is not supported; use terminal-browser or cha/);
+}
+
+// A terminal-browser that never lists itself fails the second page instead of opening it elsewhere.
+{
+  const t = fake({ installed: ["terminal-browser"], files: { "/repo/a.html": "a", "/repo/b.html": "b" } });
+  t.state.listed = false;
+  const review = createDocReview(t.pi, t.deps);
+  await assert.rejects(review.show(CWD, ["a.html", "b.html"], "Look"), /was not listed within 15000 ms/);
+  assert.equal(t.calls.filter((call) => call[1] === "new-tab").length, 0);
+  // The first page did open, so showing it again opens no second copy.
+  t.state.listed = true;
+  await review.show(CWD, ["a.html", "b.html"], "Again");
+  assert.deepEqual(t.calls.filter((call) => call[1] === "new-tab").map((call) => call.at(-1)), ["http://127.0.0.1:4000/tok1/files/repo/b.html"]);
+}
+
+// The real page server: files with the page script, answers, reload events, and nothing without the token.
+{
+  const dir = mkdtempSync(join(tmpdir(), "doc-review-server-"));
+  writeFileSync(join(dir, "a b.html"), "<form action=\"cgi-bin:pi-answer\"></form>");
+  writeFileSync(join(dir, "pic.png"), Buffer.from([0x89, 0x50]));
+  const answers = [];
+  const real = realpathSync(dir);
+  const server = await createPageServer((query) => answers.push(query), (path) => path.startsWith(`${real}/`));
+  symlinkSync("/etc/hosts", join(dir, "escape.html"));
+  try {
+    const pageUrl = `${server.base}/files${pathToFileURL(join(dir, "a b.html")).pathname}`;
+    const page = await fetch(pageUrl);
+    assert.equal(page.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.equal(page.headers.get("content-security-policy"), "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; form-action 'self'", "pages load nothing from elsewhere");
+    const html = await page.text();
+    assert.ok(html.startsWith('<form action="cgi-bin:pi-answer"></form>\n<script>'), "the page script follows the page");
+    assert.ok(html.includes(JSON.stringify(server.base)));
+    const pic = await fetch(`${server.base}/files${pathToFileURL(join(dir, "pic.png")).pathname}`);
+    assert.equal(pic.headers.get("content-type"), "image/png");
+    assert.deepEqual([...new Uint8Array(await pic.arrayBuffer())], [0x89, 0x50], "other files are served as they are");
+    assert.equal((await fetch(`${server.base}/files${dir}/missing.html`)).status, 404);
+    assert.equal((await fetch(`${server.base}/files/etc/hosts`)).status, 404, "a file outside the allowed directories is not served");
+    assert.equal((await fetch(`${server.base}/files${pathToFileURL(join(dir, "escape.html")).pathname}`)).status, 404, "nor is one a symlink leads to");
+    const origin = new URL(server.base).origin;
+    assert.equal((await fetch(`${origin}/files${pathToFileURL(join(dir, "a b.html")).pathname}`)).status, 404, "no file without the token");
+    assert.equal((await fetch(`${origin}/wrong/answer`, { method: "POST", body: "x=1" })).status, 405);
+
+    const posted = await fetch(`${server.base}/answer`, { method: "POST", body: "choice=yes" });
+    assert.equal(posted.status, 204);
+    assert.deepEqual(answers, ["choice=yes"]);
+
+    const stream = await fetch(`${server.base}/events?page=${encodeURIComponent(new URL(pageUrl).pathname)}`);
+    const reader = stream.body.getReader();
+    const decoder = new TextDecoder();
+    assert.equal(decoder.decode((await reader.read()).value), ": open\n\n");
+    server.reload(join(dir, "other.html"));
+    server.reload(join(dir, "a b.html"));
+    assert.equal(decoder.decode((await reader.read()).value), "event: reload\ndata:\n\n", "only the changed page's stream hears of it");
+    await reader.cancel();
+  } finally {
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // The document contract: `documents` lists everything shown, in full, on every change.

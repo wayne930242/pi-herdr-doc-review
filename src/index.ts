@@ -13,12 +13,19 @@
  * steered into a running turn or attached to the user's next message when idle, so a save never
  * starts a turn by itself.
  *
- * HTML files open rendered and view-only in one Chawan (`cha`) pane per session instead, one buffer
- * per page. Chawan runs a start-up script that polls its own command file the same way, so new
- * pages and reloads after the agent changes a page arrive without restarting it. A form whose action
- * is `cgi-bin:pi-answer` sends its fields to the agent the same way a save does: Chawan runs that
- * local CGI script from the scratch directory, which appends the query string to an answers file.
- * Chawan blocks a POST from a `file:` page to `cgi-bin:`, so the form submits with GET.
+ * HTML files open rendered and view-only in one browser pane per session instead: terminal-browser
+ * when it is on PATH, otherwise Chawan (`cha`); PI_HERDR_DOC_REVIEW_BROWSER picks one. A form whose
+ * action is `cgi-bin:pi-answer` sends its fields to the agent the same way a save does, in both.
+ *
+ * terminal-browser (Chromium drawn through kitty graphics) loads pages from a local HTTP server that
+ * lives with its pane: the server adds a script to each HTML page that posts such a form back to the
+ * server and reloads the page when the server says it changed. New pages open as new tabs through
+ * `terminal-browser new-tab`.
+ *
+ * Chawan instead runs a start-up script that polls its own command file the same way the editor
+ * does, so new pages and reloads after the agent changes a page arrive without restarting it. It runs
+ * the form's local CGI script from the scratch directory, which appends the query string to an
+ * answers file. Chawan blocks a POST from a `file:` page to `cgi-bin:`, so the form submits with GET.
  *
  * Other viewers (a browser page, for one) read the same documents through pi's event bus:
  * `doc-review:documents` carries the full list on every change, and a `doc-review:form` event
@@ -32,9 +39,11 @@ import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
+import { createServer, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const MINI_SDD_FILE = /(^|\/)docs\/specs\/[^/]+\/(decision|spec|design|verification)\.md$/;
 export const MINI_SDD_PHASES = ["decision.md", "spec.md", "design.md", "verification.md"];
@@ -45,7 +54,12 @@ export const EDITOR_ENV = "PI_HERDR_DOC_REVIEW_EDITOR";
 export const EDITORS = ["nvim", "vim"];
 export const POLL_MS = 250;
 export const HTML_FILE = /\.html?$/i;
-export const BROWSER = "cha";
+export const BROWSER_ENV = "PI_HERDR_DOC_REVIEW_BROWSER";
+export const TERMINAL_BROWSER = "terminal-browser";
+export const CHAWAN = "cha";
+/** The browsers HTML review supports, in the order tried when PI_HERDR_DOC_REVIEW_BROWSER is unset. */
+export const BROWSERS = [TERMINAL_BROWSER, CHAWAN];
+const BROWSER_NAMES: Record<string, string> = { [TERMINAL_BROWSER]: "terminal-browser", [CHAWAN]: "Chawan" };
 /** The local CGI script an HTML form names as `action="cgi-bin:pi-answer"` to send its fields to the agent. */
 export const ANSWER_CGI = "pi-answer";
 /** The document contract on pi's event bus; every payload carries `version`. */
@@ -62,6 +76,11 @@ export const MAX_REMEMBERED_ANSWERS = 256;
 export const PANE_CHECK_MS = 1000;
 const READY_WAIT_MS = 5000;
 const READY_POLL_MS = 100;
+/** terminal-browser starts Chromium before it lists itself, so a second page waits this long for it. */
+export const TERMINAL_BROWSER_WAIT_MS = 15_000;
+const TERMINAL_BROWSER_POLL_MS = 250;
+/** The largest form submission the page server reads. */
+const MAX_ANSWER_BYTES = 1_000_000;
 
 export interface RunResult {
   status: number | null;
@@ -69,11 +88,24 @@ export interface RunResult {
   stderr: string;
 }
 
+/** The local HTTP server terminal-browser loads pages from. */
+export interface PageServer {
+  /** `http://127.0.0.1:<port>/<token>`: the page at absolute path `/a/b.html` is `<base>/files/a/b.html`. */
+  base: string;
+  /** Tells every open copy of the page at `path` to reload. */
+  reload: (path: string) => void;
+  close: () => void;
+}
+
 export interface DocReviewDeps {
   paneId: string | undefined;
   herdr: string;
   /** The editor the user chose through PI_HERDR_DOC_REVIEW_EDITOR, if any. */
   editor: string | undefined;
+  /** The browser the user chose through PI_HERDR_DOC_REVIEW_BROWSER, if any. */
+  browser: string | undefined;
+  /** Starts a page server; `onAnswer` gets the query string of each submitted form. */
+  servePages: (onAnswer: (query: string) => void, allowed: (path: string) => boolean) => Promise<PageServer>;
   onPath: (command: string) => boolean;
   pidAlive: (pid: number) => boolean;
   run: (command: string, args: string[]) => RunResult;
@@ -94,6 +126,8 @@ const defaultDeps: DocReviewDeps = {
   paneId: process.env.HERDR_PANE_ID,
   herdr: process.env.HERDR_BIN_PATH ?? "herdr",
   editor: process.env[EDITOR_ENV],
+  browser: process.env[BROWSER_ENV],
+  servePages: (onAnswer, allowed) => createPageServer(onAnswer, allowed),
   onPath: (command) => spawnSync("sh", ["-c", 'command -v "$1"', "sh", command], { stdio: "ignore" }).status === 0,
   pidAlive: (pid) => {
     try {
@@ -144,15 +178,25 @@ interface Viewer {
   stopWatch: () => void;
 }
 
+/** The browser pane; each browser program supplies the ways to open, reload, and quit. */
 interface Browser {
+  program: string;
   pane: string;
   dir: string;
-  control: string;
   ready: string;
-  answers: string;
-  answersOffset: number;
-  stopWatch: () => void;
+  /** Opens pages in the running browser, each as its own buffer or tab. */
+  open: (paths: string[]) => Promise<void>;
+  reload: (path: string) => void;
+  /** Asks the browser to quit; its pane's shell then removes the scratch dir. */
+  quit: () => void;
+  /** Stops listening for its form answers. */
+  stop: () => void;
+  /** Set once its pane's shell is up, so the pane check does not take a starting browser for a quit one. */
+  started: boolean;
 }
+
+/** A browser that is ready to run, and the command its pane's shell runs. */
+type StartedBrowser = [Browser, string];
 
 interface ShownDoc {
   display: string;
@@ -294,6 +338,151 @@ export function answerScript(answers: string): string {
   ].join("\n");
 }
 
+const CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".json": "application/json",
+  ".txt": "text/plain; charset=utf-8",
+  ".md": "text/plain; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+};
+
+/**
+ * The script the page server adds to each HTML page: a form whose action is `cgi-bin:pi-answer`
+ * posts its fields to the server instead of leaving the page, and the page reloads when the server
+ * sends `reload` for it.
+ */
+export function pageScript(base: string): string {
+  return [
+    "<script>(() => {",
+    `  const base = ${JSON.stringify(base)};`,
+    "  const note = (text) => {",
+    '    const box = document.createElement("div");',
+    "    box.textContent = text;",
+    '    box.style.cssText = "position:fixed;right:1em;bottom:1em;padding:.5em 1em;background:#222;color:#fff;border-radius:4px;z-index:2147483647";',
+    "    document.body.append(box);",
+    "    setTimeout(() => box.remove(), 4000);",
+    "  };",
+    '  document.addEventListener("submit", (event) => {',
+    "    const form = event.target;",
+    `    if (!(form instanceof HTMLFormElement) || form.getAttribute("action") !== ${JSON.stringify(`cgi-bin:${ANSWER_CGI}`)}) return;`,
+    "    event.preventDefault();",
+    '    fetch(base + "/answer", { method: "POST", body: new URLSearchParams(new FormData(form, event.submitter)).toString() }).then(',
+    '      (response) => note(response.ok ? "Sent to the agent." : "Not sent: HTTP " + response.status),',
+    '      (error) => note("Not sent: " + error.message),',
+    "    );",
+    "  }, true);",
+    '  new EventSource(base + "/events?page=" + encodeURIComponent(location.pathname)).addEventListener("reload", () => location.reload());',
+    "})();</script>",
+    "",
+  ].join("\n");
+}
+
+const finish = (response: ServerResponse, status: number): void => {
+  response.statusCode = status;
+  response.end();
+};
+
+/**
+ * Pages may run their own inline and same-server scripts, but load nothing from elsewhere, so no
+ * third-party script runs beside the files the server serves. A page can still navigate away.
+ */
+export const PAGE_POLICY = "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; form-action 'self'";
+
+/**
+ * Serves files to terminal-browser on 127.0.0.1 behind a random token, so only a page it was sent
+ * to can load files or post answers. `GET <base>/files/<absolute path>` returns the file when its
+ * real path passes `allowed`, an HTML file with {@link pageScript} added; `POST <base>/answer` hands
+ * the body to `onAnswer`; `GET <base>/events?page=<page path>` is the event stream that tells a page
+ * to reload. Every response carries {@link PAGE_POLICY}.
+ */
+export function createPageServer(onAnswer: (query: string) => void, allowed: (path: string) => boolean): Promise<PageServer> {
+  const prefix = `/${randomUUID()}`;
+  const filesPrefix = `${prefix}/files`;
+  /** Open event streams by the absolute path of the page that opened them. */
+  const streams = new Map<string, Set<ServerResponse>>();
+  const pathOf = (urlPath: string): string | undefined => {
+    if (!urlPath.startsWith(`${filesPrefix}/`)) return undefined;
+    try {
+      return fileURLToPath(`file://${urlPath.slice(filesPrefix.length)}`);
+    } catch {
+      return undefined;
+    }
+  };
+  let base = "";
+  const server = createServer((request, response) => {
+    response.setHeader("content-security-policy", PAGE_POLICY);
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === `${prefix}/answer` && request.method === "POST") {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk: string) => {
+        body += chunk;
+        if (body.length > MAX_ANSWER_BYTES) request.destroy();
+      });
+      request.on("end", () => {
+        onAnswer(body);
+        finish(response, 204);
+      });
+      return;
+    }
+    if (request.method !== "GET") return finish(response, 405);
+    if (url.pathname === `${prefix}/events`) {
+      const page = pathOf(url.searchParams.get("page") ?? "");
+      if (!page) return finish(response, 400);
+      response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+      response.write(": open\n\n");
+      const open = streams.get(page) ?? new Set();
+      streams.set(page, open.add(response));
+      response.on("close", () => open.delete(response));
+      return;
+    }
+    const requested = pathOf(url.pathname);
+    if (!requested) return finish(response, 404);
+    let path: string;
+    let content: Buffer;
+    try {
+      // The real path is what is checked and read, so a symlink cannot lead outside what is allowed.
+      path = realpathSync(requested);
+      if (!allowed(path)) return finish(response, 404);
+      content = readFileSync(path);
+    } catch {
+      return finish(response, 404);
+    }
+    const type = CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream";
+    response.writeHead(200, { "content-type": type, "cache-control": "no-store" });
+    response.end(HTML_FILE.test(path) ? Buffer.concat([content, Buffer.from(`\n${pageScript(base)}`)]) : content);
+  });
+  server.unref();
+  return new Promise((done, fail) => {
+    server.once("error", fail);
+    server.listen(0, "127.0.0.1", () => {
+      base = `http://127.0.0.1:${(server.address() as AddressInfo).port}${prefix}`;
+      done({
+        base,
+        reload: (path) => {
+          for (const stream of streams.get(path) ?? []) stream.write("event: reload\ndata:\n\n");
+        },
+        close: () => {
+          for (const open of streams.values()) for (const stream of open) stream.end();
+          streams.clear();
+          server.close();
+          server.closeAllConnections();
+        },
+      });
+    });
+  });
+}
+
 /** The user's edits as zero-context hunks: the `@@` headers carry the line numbers. */
 function feedbackMessage(display: string, diff: string): string {
   const hunks = diff
@@ -320,6 +509,16 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
   const shown = new Map<string, ShownDoc>();
   /** HTML pages on screen, with the content the browser last loaded. */
   const pages = new Map<string, string>();
+  /**
+   * Pages shown in the current browser: the page server serves files only from their directories,
+   * and nothing whose name below them starts with a dot (`.env`, `.git`, `.ssh`).
+   */
+  const servable = new Set<string>();
+  const canServe = (path: string): boolean =>
+    [...servable].some((page) => {
+      const inside = relative(dirname(page), path);
+      return inside !== "" && !isAbsolute(inside) && inside.split(sep).every((part) => !part.startsWith("."));
+    });
   /** Every document shown, by real path, oldest first; this is what the `documents` event lists. */
   const docs = new Map<string, DocEntry>();
   const answers = new Map<string, FormResult>();
@@ -342,7 +541,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
       const content = deps.readFile(path);
       if (before === undefined || content === undefined || content === before) continue;
       pages.set(path, content);
-      if (browser && browserAlive()) command(browser, `piDocReviewReload(${JSON.stringify(pathToFileURL(path).href)})`);
+      if (browser && browserAlive()) browser.reload(path);
     }
   };
   const reload = (): void => {
@@ -403,6 +602,8 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
   };
 
   function checkPanes(): void {
+    // A browser the user quit stops listening (terminal-browser's page server with it) now, not at the next show.
+    if (browser?.started && !browserAlive()) closeBrowser();
     dropScreen([...(viewerAlive() ? [] : ["text" as const]), ...(browserAlive() ? [] : ["html" as const])]);
   }
 
@@ -485,24 +686,21 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     else deps.removeDir(current.dir);
   };
 
-  /** Each submitted form is one query string line in the answers file. */
-  const readAnswers = (): void => {
-    if (!browser) return;
-    const log = deps.readFile(browser.answers) ?? "";
-    const fresh = log.slice(browser.answersOffset);
-    browser.answersOffset = log.length;
-    for (const line of fresh.split("\n").filter(Boolean)) deliver(formMessage(new URLSearchParams(line)), "Your form answers", true);
+  /** One submitted form as a query string; a form without fields never reaches the agent. */
+  const answered = (query: string): void => {
+    if (query) deliver(formMessage(new URLSearchParams(query)), "Your form answers", true);
   };
 
   const closeBrowser = (): void => {
     const current = browser;
     browser = undefined;
     pages.clear();
+    servable.clear();
     dropScreen(["html"]);
     if (!current) return;
-    current.stopWatch();
-    // The pane's shell removes the scratch directory once Chawan exits.
-    if (alive(current.ready)) command(current, "quit()");
+    current.stop();
+    // The pane's shell removes the scratch directory once the browser exits.
+    if (alive(current.ready)) current.quit();
     else deps.removeDir(current.dir);
   };
 
@@ -522,31 +720,133 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     }
   };
 
-  const launchBrowser = async (cwd: string, paths: string[]): Promise<void> => {
-    closeBrowser();
-    if (!deps.onPath(BROWSER)) throw new Error(`HTML review needs Chawan (${BROWSER}) on PATH`);
-    const pane = splitPane(cwd, viewer && viewerAlive() ? viewer : undefined);
-    const dir = deps.makeDir();
+  const chooseBrowser = (): string => {
+    if (deps.browser) {
+      if (!BROWSERS.includes(deps.browser)) throw new Error(`${BROWSER_ENV}=${deps.browser} is not supported; use ${BROWSERS.join(" or ")}`);
+      if (!deps.onPath(deps.browser)) throw new Error(`${BROWSER_ENV}=${deps.browser}, but ${deps.browser} is not on PATH`);
+      return deps.browser;
+    }
+    const found = BROWSERS.find((program) => deps.onPath(program));
+    if (!found) throw new Error(`HTML review needs terminal-browser or Chawan (${CHAWAN}) on PATH`);
+    return found;
+  };
+
+  /** Runs `inner` in the pane's shell after recording that shell's pid; the scratch dir goes once it exits. */
+  const runInPane = (pane: string, dir: string, ready: string, inner: string): void => {
+    const wrapped = `echo $$ > ${shellQuote(ready)}; ${inner}; rm -rf ${shellQuote(dir)}`;
+    // `exit` closes the pane when the user quits the browser; the next HTML show opens a fresh one.
+    herdr("pane", "run", pane, `sh -c ${shellQuote(wrapped)}; exit`);
+  };
+
+  const startChawan = (pane: string, dir: string, ready: string, paths: string[]): StartedBrowser => {
     const control = join(dir, "commands.js");
-    const ready = join(dir, "ready");
     const script = join(dir, "review.js");
     // The script path sits inside a TOML literal string, which cannot hold a single quote.
-    if (script.includes("'")) throw new Error(`cannot start ${BROWSER} from a scratch path containing a quote: ${script}`);
+    if (script.includes("'")) throw new Error(`cannot start ${CHAWAN} from a scratch path containing a quote: ${script}`);
     const answers = join(dir, "answers.log");
     deps.writeFile(control, "");
     deps.writeFile(answers, "");
     deps.writeFile(script, browserScript(control));
     deps.writeFile(join(dir, ANSWER_CGI), answerScript(answers), 0o755);
-    browser = { pane, dir, control, ready, answers, answersOffset: 0, stopWatch: deps.watch(answers, readAnswers) };
+    // Each submitted form is one query string line in the answers file.
+    let offset = 0;
+    const stopWatch = deps.watch(answers, () => {
+      const log = deps.readFile(answers) ?? "";
+      const fresh = log.slice(offset);
+      offset = log.length;
+      for (const line of fresh.split("\n")) answered(line);
+    });
     const startup = `start.startup-script='(0, eval)(readFile(${JSON.stringify(script)}))'`;
     // The scratch dir serves the answer script; Chawan's own directory serves file: and its other schemes.
     const cgiDirs = `external.cgi-dir=['${dir}', '$CHA_LIBEXEC_DIR/cgi-bin']`;
     // Chawan loads no images unless buffer.images is on; it then draws them with the terminal's kitty or sixel support.
-    const inner = `echo $$ > ${shellQuote(ready)}; ${BROWSER} -o ${shellQuote(startup)} -o ${shellQuote(cgiDirs)} -o buffer.images=true -- ${paths.map(shellQuote).join(" ")}; rm -rf ${shellQuote(dir)}`;
-    // `exit` closes the pane when the user quits Chawan; the next HTML show opens a fresh one.
-    herdr("pane", "run", pane, `sh -c ${shellQuote(inner)}; exit`);
-    herdr("pane", "rename", pane, "html review");
-    await waitReady(ready, BROWSER, pane);
+    const run = `${CHAWAN} -o ${shellQuote(startup)} -o ${shellQuote(cgiDirs)} -o buffer.images=true -- ${paths.map(shellQuote).join(" ")}`;
+    const url = (path: string) => JSON.stringify(pathToFileURL(path).href);
+    const chawan: Browser = {
+      program: CHAWAN,
+      pane,
+      dir,
+      ready,
+      open: async (more) => {
+        for (const path of more) command({ control }, `pager.gotoURL(${url(path)})`);
+      },
+      reload: (path) => command({ control }, `piDocReviewReload(${url(path)})`),
+      quit: () => command({ control }, "quit()"),
+      stop: stopWatch,
+      started: false,
+    };
+    return [chawan, run];
+  };
+
+  const startTerminalBrowser = (pane: string, dir: string, ready: string, first: string, server: PageServer): StartedBrowser => {
+    const url = (path: string) => `${server.base}/files${pathToFileURL(path).pathname}`;
+    let key: string | undefined;
+    /** The key terminal-browser lists this pane's browser under, once Chromium has started. */
+    const findKey = async (): Promise<string> => {
+      for (let waited = 0; ; waited += TERMINAL_BROWSER_POLL_MS) {
+        const listing = deps.run(TERMINAL_BROWSER, ["ls", "--json", "--all"]);
+        if (listing.status === 0) {
+          try {
+            const { browsers } = JSON.parse(listing.stdout) as { browsers?: { key?: string; pane?: { pane?: string } }[] };
+            const found = browsers?.find((candidate) => candidate.pane?.pane === pane)?.key;
+            if (found) return found;
+          } catch {
+            // A listing cut short by a starting browser is read again on the next poll.
+          }
+        }
+        if (waited >= TERMINAL_BROWSER_WAIT_MS) throw new Error(`terminal-browser in pane ${pane} was not listed within ${TERMINAL_BROWSER_WAIT_MS} ms`);
+        await deps.sleep(TERMINAL_BROWSER_POLL_MS);
+      }
+    };
+    const terminalBrowser: Browser = {
+      program: TERMINAL_BROWSER,
+      pane,
+      dir,
+      ready,
+      open: async (more) => {
+        key ??= await findKey();
+        for (const path of more) {
+          const opened = deps.run(TERMINAL_BROWSER, ["new-tab", "--browser", key, url(path)]);
+          if (opened.status !== 0) throw new Error(`terminal-browser new-tab failed: ${(opened.stderr || opened.stdout).trim()}`);
+        }
+      },
+      reload: (path) => server.reload(path),
+      // ctrl+q quits terminal-browser; a pane already gone has nothing left to quit.
+      quit: () => void deps.run(deps.herdr, ["pane", "send-keys", pane, "ctrl+q"]),
+      stop: server.close,
+      started: false,
+    };
+    // --no-merge keeps it out of another terminal-browser in the same Herdr tab.
+    return [terminalBrowser, `${TERMINAL_BROWSER} open ${shellQuote(url(first))} --no-merge`];
+  };
+
+  /** Starts a browser on `paths`; returns the pages it opened, since terminal-browser starts on the first alone. */
+  const launchBrowser = async (cwd: string, paths: string[]): Promise<string[]> => {
+    closeBrowser();
+    const program = chooseBrowser();
+    for (const path of paths) servable.add(path);
+    // The server starts before the pane opens, so a server that cannot start leaves no empty pane.
+    const server = program === TERMINAL_BROWSER ? await deps.servePages(answered, canServe) : undefined;
+    let dir: string | undefined;
+    let started: StartedBrowser;
+    try {
+      const pane = splitPane(cwd, viewer && viewerAlive() ? viewer : undefined);
+      dir = deps.makeDir();
+      const ready = join(dir, "ready");
+      started = server ? startTerminalBrowser(pane, dir, ready, paths[0], server) : startChawan(pane, dir, ready, paths);
+    } catch (error) {
+      server?.close();
+      if (dir) deps.removeDir(dir);
+      throw error;
+    }
+    const [current, run] = started;
+    // Held before the pane runs anything, so a pane that fails to start is still closed and cleaned up later.
+    browser = current;
+    runInPane(current.pane, current.dir, current.ready, run);
+    herdr("pane", "rename", current.pane, "html review");
+    await waitReady(current.ready, program, current.pane);
+    current.started = true;
+    return server ? paths.slice(0, 1) : paths;
   };
 
   const launch = async (cwd: string, paths: string[]): Promise<void> => {
@@ -586,13 +886,19 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
   const showHtml = async (cwd: string, docs: { absolute: string; content: string }[]) => {
     const running = browser !== undefined && browserAlive();
     const fresh = running ? docs.filter((doc) => !pages.has(doc.absolute)) : docs;
-    if (browser && running) {
-      for (const doc of fresh) command(browser, `pager.gotoURL(${JSON.stringify(pathToFileURL(doc.absolute).href)})`);
+    if (running) {
+      for (const doc of docs) servable.add(doc.absolute);
       reloadPages(docs.map((doc) => doc.absolute));
     } else {
-      await launchBrowser(cwd, docs.map((doc) => doc.absolute));
+      const opened = await launchBrowser(cwd, docs.map((doc) => doc.absolute));
+      for (const doc of docs) if (opened.includes(doc.absolute)) pages.set(doc.absolute, doc.content);
     }
-    for (const doc of fresh) pages.set(doc.absolute, doc.content);
+    // Each page counts as open once it is, so a failure part way leaves no page to open twice.
+    for (const doc of fresh) {
+      if (pages.has(doc.absolute) || !browser) continue;
+      await browser.open([doc.absolute]);
+      pages.set(doc.absolute, doc.content);
+    }
     return fresh;
   };
 
@@ -622,7 +928,9 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     const list = (group: typeof docs) => group.map((doc) => doc.display).join(", ");
     const opened = [
       ...(texts.length > 0 ? [`${list(texts)} in Herdr pane ${viewer?.pane} (editable ${viewer?.editor}, one row per document)`] : []),
-      ...(htmls.length > 0 ? [`${list(htmls)} in Herdr pane ${browser?.pane} (rendered by Chawan, view-only, one buffer per page)`] : []),
+      ...(htmls.length > 0 && browser
+        ? [`${list(htmls)} in Herdr pane ${browser.pane} (rendered by ${BROWSER_NAMES[browser.program]}, view-only, one ${browser.program === CHAWAN ? "buffer" : "tab"} per page)`]
+        : []),
     ];
     const feedback = texts.length > 0 ? " Their saved edits will reach you as review feedback." : "";
     return {
@@ -753,7 +1061,8 @@ export default function docReview(pi: ExtensionAPI, deps: DocReviewDeps = defaul
       description:
         "Open documents the user should review in a pane beside this session (Herdr only; elsewhere it returns the paths to name to the user). " +
         "Text documents open in one editable nvim or vim pane, one row per document, and the user's saved edits come back to you as a diff. " +
-        "HTML files (.html, .htm) open rendered in one Chawan pane, one buffer per page; Chawan runs no JavaScript. " +
+        "HTML files (.html, .htm) open rendered in one browser pane, one tab or buffer per page: terminal-browser (Chromium, runs JavaScript) when installed, otherwise Chawan, which runs no JavaScript. " +
+        "Keep scripts, styles, and images inline or in the page's directory: terminal-browser loads nothing from a CDN or other site, nor from above the page's directory. " +
         "Pages are for reading: ask the user's questions with your question tool, not in a form on the page. " +
         "Use it whenever the user must understand or confirm written material: a spec, design, plan, report, or comparison; write material meant for understanding as HTML. " +
         "It returns at once without waiting for the user. Documents stay open and reload when you edit them.",
