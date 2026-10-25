@@ -442,13 +442,13 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   assert.deepEqual(t.state.removed, [SCRATCH]);
 
   const none = fake({ installed: ["nvim"], files: { "/repo/page.html": "<p>x</p>" } });
-  await assert.rejects(createDocReview(none.pi, none.deps).show(CWD, ["page.html"], "Look"), /needs terminal-browser or Chawan \(cha\) on PATH/);
+  await assert.rejects(createDocReview(none.pi, none.deps).show(CWD, ["page.html"], "Look"), /needs Chawan \(cha\) or terminal-browser on PATH/);
 }
 
-// terminal-browser is preferred when installed: pages load from the page server, more pages open as tabs.
+// terminal-browser, used when Chawan is missing: pages load from the page server, more pages open as tabs.
 {
   const WEB = "/tmp/review-3";
-  const t = fake({ dirs: [WEB], installed: ["nvim", "cha", "terminal-browser"], files: { "/repo/report.html": "<h1>v1</h1>", "/repo/my page.html": "<p>b</p>" } });
+  const t = fake({ dirs: [WEB], installed: ["nvim", "terminal-browser"], files: { "/repo/report.html": "<h1>v1</h1>", "/repo/my page.html": "<p>b</p>" } });
   const review = createDocReview(t.pi, t.deps);
   review.setContext(t.ctx);
   const result = await review.show(CWD, ["report.html", "my page.html"], "Read");
@@ -525,18 +525,21 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   assert.equal(t.state.servers[0].closed, true);
 }
 
-// PI_HERDR_DOC_REVIEW_BROWSER picks the browser and fails fast when it cannot be used.
+// Chawan is preferred when both are installed; PI_HERDR_DOC_REVIEW_BROWSER picks the browser and fails fast when it cannot be used.
 {
   const files = { "/repo/page.html": "<p>x</p>" };
-  const cha = fake({ browser: "cha", installed: ["cha", "terminal-browser"], files });
-  const result = await createDocReview(cha.pi, cha.deps).show(CWD, ["page.html"], "Look");
-  assert.match(result.text, /rendered by Chawan, view-only, one buffer per page/);
-  assert.equal(cha.state.servers.length, 0, "Chawan needs no page server");
-  const missing = fake({ browser: "terminal-browser", installed: ["cha"], files });
-  await assert.rejects(createDocReview(missing.pi, missing.deps).show(CWD, ["page.html"], "Look"), /PI_HERDR_DOC_REVIEW_BROWSER=terminal-browser, but terminal-browser is not on PATH/);
+  const both = fake({ installed: ["cha", "terminal-browser"], files });
+  const preferred = await createDocReview(both.pi, both.deps).show(CWD, ["page.html"], "Look");
+  assert.match(preferred.text, /rendered by Chawan, view-only, one buffer per page/);
+  assert.equal(both.state.servers.length, 0, "Chawan needs no page server");
+  const chosen = fake({ browser: "terminal-browser", installed: ["cha", "terminal-browser"], files });
+  const result = await createDocReview(chosen.pi, chosen.deps).show(CWD, ["page.html"], "Look");
+  assert.match(result.text, /rendered by terminal-browser, view-only, one tab per page/);
+  const missing = fake({ browser: "cha", installed: ["terminal-browser"], files });
+  await assert.rejects(createDocReview(missing.pi, missing.deps).show(CWD, ["page.html"], "Look"), /PI_HERDR_DOC_REVIEW_BROWSER=cha, but cha is not on PATH/);
   assert.equal(missing.state.splits, 0);
   const other = fake({ browser: "lynx", installed: ["lynx"], files });
-  await assert.rejects(createDocReview(other.pi, other.deps).show(CWD, ["page.html"], "Look"), /=lynx is not supported; use terminal-browser or cha/);
+  await assert.rejects(createDocReview(other.pi, other.deps).show(CWD, ["page.html"], "Look"), /=lynx is not supported; use cha or terminal-browser/);
 }
 
 // A terminal-browser that never lists itself fails the second page instead of opening it elsewhere.

@@ -13,8 +13,8 @@
  * steered into a running turn or attached to the user's next message when idle, so a save never
  * starts a turn by itself.
  *
- * HTML files open rendered and view-only in one browser pane per session instead: terminal-browser
- * when it is on PATH, otherwise Chawan (`cha`); PI_HERDR_DOC_REVIEW_BROWSER picks one. A form whose
+ * HTML files open rendered and view-only in one browser pane per session instead: Chawan (`cha`)
+ * when it is on PATH, otherwise terminal-browser; PI_HERDR_DOC_REVIEW_BROWSER picks one. A form whose
  * action is `cgi-bin:pi-answer` sends its fields to the agent the same way a save does, in both.
  *
  * terminal-browser (Chromium drawn through kitty graphics) loads pages from a local HTTP server that
@@ -58,7 +58,7 @@ export const BROWSER_ENV = "PI_HERDR_DOC_REVIEW_BROWSER";
 export const TERMINAL_BROWSER = "terminal-browser";
 export const CHAWAN = "cha";
 /** The browsers HTML review supports, in the order tried when PI_HERDR_DOC_REVIEW_BROWSER is unset. */
-export const BROWSERS = [TERMINAL_BROWSER, CHAWAN];
+export const BROWSERS = [CHAWAN, TERMINAL_BROWSER];
 const BROWSER_NAMES: Record<string, string> = { [TERMINAL_BROWSER]: "terminal-browser", [CHAWAN]: "Chawan" };
 /** The local CGI script an HTML form names as `action="cgi-bin:pi-answer"` to send its fields to the agent. */
 export const ANSWER_CGI = "pi-answer";
@@ -727,7 +727,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
       return deps.browser;
     }
     const found = BROWSERS.find((program) => deps.onPath(program));
-    if (!found) throw new Error(`HTML review needs terminal-browser or Chawan (${CHAWAN}) on PATH`);
+    if (!found) throw new Error(`HTML review needs Chawan (${CHAWAN}) or terminal-browser on PATH`);
     return found;
   };
 
@@ -1061,7 +1061,7 @@ export default function docReview(pi: ExtensionAPI, deps: DocReviewDeps = defaul
       description:
         "Open documents the user should review in a pane beside this session (Herdr only; elsewhere it returns the paths to name to the user). " +
         "Text documents open in one editable nvim or vim pane, one row per document, and the user's saved edits come back to you as a diff. " +
-        "HTML files (.html, .htm) open rendered in one browser pane, one tab or buffer per page: terminal-browser (Chromium, runs JavaScript) when installed, otherwise Chawan, which runs no JavaScript. " +
+        "HTML files (.html, .htm) open rendered in one browser pane, one buffer or tab per page: Chawan, which runs no JavaScript, when installed, otherwise terminal-browser (Chromium, runs JavaScript). " +
         "Keep scripts, styles, and images inline or in the page's directory: terminal-browser loads nothing from a CDN or other site, nor from above the page's directory. " +
         "Pages are for reading: ask the user's questions with your question tool, not in a form on the page. " +
         "Use it whenever the user must understand or confirm written material: a spec, design, plan, report, or comparison; write material meant for understanding as HTML. " +
