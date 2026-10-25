@@ -13,7 +13,7 @@
  * steered into a running turn or attached to the user's next message when idle, so a save never
  * starts a turn by itself.
  *
- * HTML files open rendered and view-only in one browser pane per session instead: Chawan (`cha`)
+ * HTML files and images open rendered and view-only in one browser pane per session instead: Chawan (`cha`)
  * when it is on PATH, otherwise terminal-browser; PI_HERDR_DOC_REVIEW_BROWSER picks one. A form whose
  * action is `cgi-bin:pi-answer` sends its fields to the agent the same way a save does, in both.
  *
@@ -54,6 +54,8 @@ export const EDITOR_ENV = "PI_HERDR_DOC_REVIEW_EDITOR";
 export const EDITORS = ["nvim", "vim"];
 export const POLL_MS = 250;
 export const HTML_FILE = /\.html?$/i;
+/** Images open in the browser pane beside HTML pages; an editor shows them as bytes. */
+export const IMAGE_FILE = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
 export const BROWSER_ENV = "PI_HERDR_DOC_REVIEW_BROWSER";
 export const TERMINAL_BROWSER = "terminal-browser";
 export const CHAWAN = "cha";
@@ -328,6 +330,24 @@ export function browserScript(control: string): string {
   ].join("\n");
 }
 
+const escapeHtml = (value: string): string =>
+  value.replace(/[&<>"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char] as string);
+
+/**
+ * The page Chawan shows an image in, fitted to the pane: opened on its own, an image waits on
+ * Chawan's "Open as" prompt.
+ */
+export function imagePage(path: string): string {
+  const name = escapeHtml(basename(path));
+  return [
+    '<!doctype html><meta charset="utf-8">',
+    `<title>${name}</title>`,
+    "<style>body{margin:0}img{max-width:100%;max-height:100vh}</style>",
+    `<img src="${escapeHtml(pathToFileURL(path).href)}" alt="${name}">`,
+    "",
+  ].join("\n");
+}
+
 /** The local CGI script behind `cgi-bin:pi-answer`: it records one submitted form and confirms it. */
 export function answerScript(answers: string): string {
   return [
@@ -353,6 +373,7 @@ const CONTENT_TYPES: Record<string, string> = {
   ".jpeg": "image/jpeg",
   ".gif": "image/gif",
   ".webp": "image/webp",
+  ".bmp": "image/bmp",
   ".ico": "image/x-icon",
 };
 
@@ -759,9 +780,22 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     const startup = `start.startup-script='(0, eval)(readFile(${JSON.stringify(script)}))'`;
     // The scratch dir serves the answer script; Chawan's own directory serves file: and its other schemes.
     const cgiDirs = `external.cgi-dir=['${dir}', '$CHA_LIBEXEC_DIR/cgi-bin']`;
+    /** Each image's page in the scratch dir, by the image's path. */
+    const imagePages = new Map<string, string>();
+    /** What Chawan opens for `path`: the page itself, or an image's page. */
+    const target = (path: string): string => {
+      if (!IMAGE_FILE.test(path)) return path;
+      let page = imagePages.get(path);
+      if (!page) {
+        page = join(dir, `image-${imagePages.size + 1}.html`);
+        deps.writeFile(page, imagePage(path));
+        imagePages.set(path, page);
+      }
+      return page;
+    };
     // Chawan loads no images unless buffer.images is on; it then draws them with the terminal's kitty or sixel support.
-    const run = `${CHAWAN} -o ${shellQuote(startup)} -o ${shellQuote(cgiDirs)} -o buffer.images=true -- ${paths.map(shellQuote).join(" ")}`;
-    const url = (path: string) => JSON.stringify(pathToFileURL(path).href);
+    const run = `${CHAWAN} -o ${shellQuote(startup)} -o ${shellQuote(cgiDirs)} -o buffer.images=true -- ${paths.map((path) => shellQuote(target(path))).join(" ")}`;
+    const url = (path: string) => JSON.stringify(pathToFileURL(target(path)).href);
     const chawan: Browser = {
       program: CHAWAN,
       pane,
@@ -911,10 +945,16 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
       const rel = relative(deps.realpath(cwd), absolute);
       return { absolute, content, display: rel.startsWith("..") ? absolute : rel };
     });
+    const inBrowser = (doc: { absolute: string }) => HTML_FILE.test(doc.absolute) || IMAGE_FILE.test(doc.absolute);
+    const texts = docs.filter((doc) => !inBrowser(doc));
+    const htmls = docs.filter(inBrowser);
+    // A NUL byte marks a binary file, which the editor would show as bytes; nothing opens when one is asked for.
+    const binary = texts.filter((doc) => doc.content.includes("\0"));
+    if (binary.length > 0) {
+      throw new Error(`cannot show binary files: ${binary.map((doc) => doc.display).join(", ")}; show_doc opens text, HTML, and images (png, jpg, gif, webp, bmp, svg)`);
+    }
     const names = docs.map((doc) => doc.display).join(", ");
     if (!deps.paneId) return { opened: [], text: `Not running inside Herdr, so no review pane opened. Tell the user to read: ${names}` };
-    const texts = docs.filter((doc) => !HTML_FILE.test(doc.absolute));
-    const htmls = docs.filter((doc) => HTML_FILE.test(doc.absolute));
     const fresh: unknown[] = [];
     if (texts.length > 0) {
       fresh.push(...(await showText(cwd, texts)));
@@ -922,7 +962,9 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     }
     if (htmls.length > 0) {
       fresh.push(...(await showHtml(cwd, htmls)));
-      register(htmls, "html", reason);
+      // Images stay off the event bus: its contract lists HTML and text documents only.
+      const pages = htmls.filter((doc) => HTML_FILE.test(doc.absolute));
+      if (pages.length > 0) register(pages, "html", reason);
     }
     if (fresh.length > 0) herdr("notification", "show", "Document ready for review", "--body", `${reason}: ${names}`, "--sound", "request");
     const list = (group: typeof docs) => group.map((doc) => doc.display).join(", ");
@@ -1061,7 +1103,7 @@ export default function docReview(pi: ExtensionAPI, deps: DocReviewDeps = defaul
       description:
         "Open documents the user should review in a pane beside this session (Herdr only; elsewhere it returns the paths to name to the user). " +
         "Text documents open in one editable nvim or vim pane, one row per document, and the user's saved edits come back to you as a diff. " +
-        "HTML files (.html, .htm) open rendered in one browser pane, one buffer or tab per page: Chawan, which runs no JavaScript, when installed, otherwise terminal-browser (Chromium, runs JavaScript). " +
+        "HTML files (.html, .htm) and images (png, jpg, gif, webp, bmp, svg) open rendered in one browser pane, one buffer or tab per page: Chawan, which runs no JavaScript, when installed, otherwise terminal-browser (Chromium, runs JavaScript). Other binary files are refused. " +
         "Keep scripts, styles, and images inline or in the page's directory: terminal-browser loads nothing from a CDN or other site, nor from above the page's directory. " +
         "Pages are for reading: ask the user's questions with your question tool, not in a form on the page. " +
         "Use it whenever the user must understand or confirm written material: a spec, design, plan, report, or comparison; write material meant for understanding as HTML. " +

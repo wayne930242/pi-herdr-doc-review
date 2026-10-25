@@ -445,6 +445,47 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   await assert.rejects(createDocReview(none.pi, none.deps).show(CWD, ["page.html"], "Look"), /needs Chawan \(cha\) or terminal-browser on PATH/);
 }
 
+// Images open rendered in the browser pane, never in the editor, and stay off the document list.
+{
+  const t = fake({ files: { "/repo/a.md": "A", "/repo/shot.PNG": "\x89PNG\r\n\x1a\n\0\0\0\rIHDR", "/repo/logo.svg": "<svg/>" } });
+  const review = createDocReview(t.pi, t.deps);
+  const result = await review.show(CWD, ["a.md", "shot.PNG"], "Look");
+  assert.match(result.text, /a\.md in Herdr pane w:p2 \(editable nvim.*\) and shot\.PNG in Herdr pane w:p3 \(rendered by Chawan/);
+  const runs = t.calls.filter((call) => call[0] === "herdr" && call[2] === "run").map((call) => call.at(-1));
+  assert.match(runs[0], /-- '\/repo\/a\.md'; exit$/, "the image does not open in the editor");
+  assert.match(runs[1], /-- '\\''\/tmp\/review-1\/image-1\.html'\\''/, "Chawan opens the image's page");
+  assert.equal(
+    t.fs.get(`${SCRATCH}/image-1.html`),
+    '<!doctype html><meta charset="utf-8">\n<title>shot.PNG</title>\n<style>body{margin:0}img{max-width:100%;max-height:100vh}</style>\n<img src="file:///repo/shot.PNG" alt="shot.PNG">\n',
+    "the page fits the image to the pane",
+  );
+  assert.deepEqual(
+    t.lists().at(-1).map((doc) => [doc.path, doc.kind]),
+    [["/repo/a.md", "text"]],
+  );
+  const listed = t.lists().length;
+  const browserCommands = () => t.fs.get(`${SCRATCH}/commands.js`).split("\n").filter(Boolean);
+  t.fs.set("/repo/a&b.svg", "<svg/>");
+  await review.show(CWD, ["logo.svg", "a&b.svg"], "Logos");
+  assert.deepEqual(browserCommands(), ['pager.gotoURL("file:///tmp/review-1/image-2.html")', 'pager.gotoURL("file:///tmp/review-1/image-3.html")'], "an SVG opens as an image too");
+  assert.match(t.fs.get(`${SCRATCH}/image-3.html`), /<title>a&amp;b\.svg<\/title>[\s\S]*src="file:\/\/\/repo\/a&amp;b\.svg" alt="a&amp;b\.svg"/, "names are escaped");
+  assert.equal(t.lists().length, listed, "an image-only show publishes nothing");
+
+  // The agent's change to an image reloads its page.
+  t.fs.set("/repo/logo.svg", "<svg><rect/></svg>");
+  review.agentWrote("/repo/logo.svg");
+  assert.equal(browserCommands().at(-1), 'piDocReviewReload("file:///tmp/review-1/image-2.html")');
+}
+
+// A binary file that is not an image is refused before any pane opens.
+{
+  const t = fake({ files: { "/repo/a.md": "A", "/repo/report.pdf": "%PDF-1.7\n\0\x01" } });
+  await assert.rejects(createDocReview(t.pi, t.deps).show(CWD, ["a.md", "report.pdf"], "Look"), /cannot show binary files: report\.pdf; show_doc opens text, HTML, and images/);
+  assert.equal(t.calls.length, 0);
+  const outside = fake({ paneId: undefined, files: { "/repo/report.pdf": "\0" } });
+  await assert.rejects(createDocReview(outside.pi, outside.deps).show(CWD, ["report.pdf"], "Look"), /cannot show binary files/);
+}
+
 // terminal-browser, used when Chawan is missing: pages load from the page server, more pages open as tabs.
 {
   const WEB = "/tmp/review-3";
