@@ -54,6 +54,10 @@
   details { border: 1px solid var(--pi-border); border-radius: var(--pi-radius); padding: 0.5rem 1rem; }
   summary { cursor: pointer; font-weight: 600; }
   img, svg { max-width: 100%; height: auto; }
+  button { font: inherit; font-weight: 600; color: #fff; background: var(--pi-accent); border: 0; border-radius: var(--pi-radius); padding: 0.5rem 1.2rem; cursor: pointer; }
+  button:disabled { opacity: 0.6; cursor: default; }
+  input, select, textarea { accent-color: var(--pi-accent); }
+  select, input:not([type]), input[type="text"], input[type="number"] { font: inherit; color: inherit; background: var(--pi-bg); border: 1px solid var(--pi-border); border-radius: 6px; padding: 0.3rem 0.6rem; }
 
   /* <pi-callout tone="note|ok|warn|risk" title="…"> */
   /* Tone shows through a tint and the title's colour; borders stay uniform on all four sides. */

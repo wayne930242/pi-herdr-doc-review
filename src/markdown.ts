@@ -57,7 +57,7 @@ const items = (data: unknown, key: string): unknown[] => {
   return found;
 };
 
-function renderMermaid(source: string): string {
+export function renderMermaid(source: string): string {
   const svg = renderMermaidSVG(source, { bg: "var(--pi-bg)", fg: "var(--pi-fg)", accent: "var(--pi-accent)", transparent: true });
   // The page loads nothing from other sites, so the diagram's web font import is dropped for the page's own font.
   return `<figure class="pi-diagram">${svg.replace(/@import url\([^)]*\);?/g, "")}</figure>\n`;
@@ -165,6 +165,11 @@ md.core.ruler.after("block", "pi-alerts", (state) => {
     }
   }
 });
+
+/** A Markdown fragment, with the same blocks and alerts a page has. */
+export function renderMarkdown(source: string): string {
+  return md.render(source);
+}
 
 /** The whole page: its title is the first `# heading`, else the file name; Chinese text marks it zh-Hant. */
 export function renderMarkdownPage(source: string, name: string): string {

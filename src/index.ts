@@ -44,7 +44,8 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { MARKDOWN_FILE, renderMarkdownPage } from "./markdown.ts";
+import { MARKDOWN_FILE, renderMarkdown, renderMarkdownPage, renderMermaid } from "./markdown.ts";
+import { bundleReactPage, REACT_FILE, reactShell } from "./react.ts";
 
 export const MINI_SDD_FILE = /(^|\/)docs\/specs\/[^/]+\/(decision|spec|design|verification)\.md$/;
 export const MINI_SDD_PHASES = ["decision.md", "spec.md", "design.md", "verification.md"];
@@ -418,7 +419,7 @@ export function pageScript(base: string): string {
     '  const send = (fields) => fetch(base + "/answer", { method: "POST", body: new URLSearchParams(fields).toString() }).then((response) => {',
     '    if (!response.ok) throw new Error("HTTP " + response.status);',
     "  });",
-    "  window.piDocReview = { send };",
+    "  window.piDocReview = { base, send };",
     '  document.addEventListener("submit", (event) => {',
     "    const form = event.target;",
     `    if (!(form instanceof HTMLFormElement) || form.getAttribute("action") !== ${JSON.stringify(`cgi-bin:${ANSWER_CGI}`)}) return;`,
@@ -469,18 +470,35 @@ export function createPageServer(onAnswer: (query: string) => void, allowed: (pa
   const server = createServer((request, response) => {
     response.setHeader("content-security-policy", PAGE_POLICY);
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    if (url.pathname === `${prefix}/answer` && request.method === "POST") {
-      let body = "";
+    /** Reads a POST body of at most MAX_ANSWER_BYTES. */
+    const body = (then: (text: string) => void): void => {
+      let text = "";
       request.setEncoding("utf8");
       request.on("data", (chunk: string) => {
-        body += chunk;
-        if (body.length > MAX_ANSWER_BYTES) request.destroy();
+        text += chunk;
+        if (text.length > MAX_ANSWER_BYTES) request.destroy();
       });
-      request.on("end", () => {
-        onAnswer(body);
+      request.on("end", () => then(text));
+    };
+    if (url.pathname === `${prefix}/answer` && request.method === "POST") {
+      return body((text) => {
+        onAnswer(text);
         finish(response, 204);
       });
-      return;
+    }
+    // React pages render Markdown and diagrams through the server, as Markdown pages do.
+    const renderer = { [`${prefix}/render/markdown`]: renderMarkdown, [`${prefix}/render/mermaid`]: renderMermaid }[url.pathname];
+    if (renderer && request.method === "POST") {
+      return body((text) => {
+        try {
+          const html = renderer(text);
+          response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+          response.end(html);
+        } catch (error) {
+          response.writeHead(422, { "content-type": "text/plain; charset=utf-8" });
+          response.end((error as Error).message ?? String(error));
+        }
+      });
     }
     if (request.method !== "GET") return finish(response, 405);
     if (url.pathname === `${prefix}/events`) {
@@ -510,6 +528,16 @@ export function createPageServer(onAnswer: (query: string) => void, allowed: (pa
       content = readFileSync(path);
     } catch {
       return finish(response, 404);
+    }
+    if (REACT_FILE.test(path)) {
+      if (url.searchParams.has("bundle")) {
+        return void bundleReactPage(path).then((script) => {
+          response.writeHead(200, { "content-type": CONTENT_TYPES[".js"], "cache-control": "no-store" });
+          response.end(script);
+        });
+      }
+      response.writeHead(200, { "content-type": CONTENT_TYPES[".html"], "cache-control": "no-store" });
+      return void response.end(`${reactShell(path, url.pathname, content.toString("utf8"))}\n${pageScript(base)}`);
     }
     // A Markdown file is served as the page it renders to.
     const markdown = MARKDOWN_FILE.test(path);
@@ -1030,12 +1058,13 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
       const rel = relative(deps.realpath(cwd), absolute);
       return { absolute, content, display: rel.startsWith("..") ? absolute : rel };
     });
-    const isMarkdownPage = (doc: { absolute: string }) => view === "page" && MARKDOWN_FILE.test(doc.absolute);
+    // Markdown and React files are text the server renders into a page when asked for view "page".
+    const isMarkdownPage = (doc: { absolute: string }) => view === "page" && (MARKDOWN_FILE.test(doc.absolute) || REACT_FILE.test(doc.absolute));
     const inBrowser = (doc: { absolute: string }) => HTML_FILE.test(doc.absolute) || IMAGE_FILE.test(doc.absolute) || isMarkdownPage(doc);
     const texts = docs.filter((doc) => !inBrowser(doc));
     const htmls = docs.filter(inBrowser);
     if (view === "page" && texts.length > 0) {
-      throw new Error(`view "page" renders Markdown, HTML, and images; open ${texts.map((doc) => doc.display).join(", ")} with view "edit"`);
+      throw new Error(`view "page" renders Markdown, React (.tsx, .jsx), HTML, and images; open ${texts.map((doc) => doc.display).join(", ")} with view "edit"`);
     }
     // A NUL byte marks a binary file, which the editor would show as bytes; nothing opens when one is asked for.
     const binary = texts.filter((doc) => doc.content.includes("\0"));
@@ -1048,7 +1077,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     // Chawan reads pages from disk, so nothing renders Markdown for it.
     const program = browser && browserAlive() ? browser.program : markdownPages.length > 0 ? chooseBrowser() : undefined;
     if (program === CHAWAN && markdownPages.length > 0) {
-      throw new Error(`Chawan cannot render Markdown pages; set ${BROWSER_ENV}=${EXTERNAL} or ${TERMINAL_BROWSER}, or open ${markdownPages.map((doc) => doc.display).join(", ")} with view "edit"`);
+      throw new Error(`Chawan cannot render Markdown or React pages; set ${BROWSER_ENV}=${EXTERNAL} or ${TERMINAL_BROWSER}, or open ${markdownPages.map((doc) => doc.display).join(", ")} with view "edit"`);
     }
     const fresh: unknown[] = [];
     if (texts.length > 0) {
@@ -1209,6 +1238,7 @@ export default function docReview(pi: ExtensionAPI, deps: DocReviewDeps = defaul
         "Images and links resolve against the page's directory; nothing loads from above it or from another site. " +
         "Every page has a feedback panel: the user comments on selected passages and sends them to you as a message. " +
         "Put decisions that belong to the page (several questions, or a choice after a comparison) in a ```form at its end; ask a single short question with your question tool. " +
+        "When a page needs interaction (inputs that recompute, tabs, filters), write a .tsx or .jsx file whose default export is a React component and open it with view \"page\": React is built in, and the \"pi-kit\" module exports Callout, Grid, Card, Badge, Options, Option, Form, Question, Choice (same props as the YAML fields), Markdown and Mermaid (children are their source), and send(fields) to hand the agent any values as a message. Import sibling modules freely; import no CSS. " +
         "In HTML pages the same elements are tags: <pi-callout tone title>, <pi-grid> of <pi-card title tone>, <pi-badge tone>, <pi-options> of <pi-option title recommended pros=\"a; b\" cons=\"c; d\">, <pi-form title submit> of <pi-question name label hint required type other> with <pi-choice value note recommended>. " +
         "It returns at once without waiting for the user. Documents stay open and reload when you edit them.",
       parameters: Type.Object({

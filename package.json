@@ -1,6 +1,6 @@
 {
   "name": "pi-herdr-doc-review",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Review the documents your pi agent writes in an editable nvim or vim pane beside it in Herdr: proposed specs open on their own, agent edits reload live, and your saved edits go back to the agent as a diff without blocking it",
   "type": "module",
   "license": "MIT",
@@ -45,12 +45,17 @@
     "@earendil-works/pi-coding-agent": "1.3.0",
     "@types/markdown-it": "14.2.0",
     "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
     "typebox": "1.3.37",
     "typescript": "7.0.2"
   },
   "dependencies": {
     "beautiful-mermaid": "1.1.3",
+    "esbuild": "0.28.2",
     "markdown-it": "15.0.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
     "yaml": "2.9.1"
   }
 }

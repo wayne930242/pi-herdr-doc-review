@@ -35,6 +35,21 @@ On top of CommonMark, tables, and raw HTML:
 
 `body` fields are Markdown. A block that cannot be drawn shows its error and source in a red callout instead of failing the page. See [`examples/markdown-demo.md`](examples/markdown-demo.md).
 
+## React pages
+
+A `.tsx` or `.jsx` file opened with `view: "page"` runs as a React page: its default export is the page component. The page server answers the file's path with a shell page and builds the bundle with [esbuild](https://esbuild.github.io) on every load, so an edit shows on the next reload. React 19 ships with this package, so a page anywhere on disk needs no `node_modules`; it may import its own sibling modules, and stylesheet imports are dropped because the kit styles the page. A build error or a render error shows on the page in a red callout.
+
+The `pi-kit` module gives React pages the kit:
+
+| Export | Use |
+| --- | --- |
+| `Callout`, `Grid`, `Card`, `Badge`, `Options`, `Option` | the kit elements, with the props the Markdown blocks take (`pros` and `cons` are arrays) |
+| `Form`, `Question`, `Choice` | a form whose answers go to the agent; `Choice` children of a `Question` are its answers |
+| `Markdown`, `Mermaid` | Markdown or a diagram from a string child, rendered by the page server |
+| `send(fields)` | sends any values (an object or `[name, value]` pairs) to the agent as a message |
+
+See [`examples/react-demo.tsx`](examples/react-demo.tsx).
+
 ## Feedback panel
 
 Every page served to the default browser or terminal-browser has a feedback button. Selecting text offers a comment on that passage; the panel collects these comments and an overall note, and sends them to the agent in one message that quotes each passage above its comment. Drafts are kept per page in the tab's session storage, so they survive the reload an agent's edit causes. Images enlarge on click.

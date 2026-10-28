@@ -15,7 +15,8 @@ const okBadge = (text) => {
 /** An element that builds its content once, when it is first attached. */
 class Built extends HTMLElement {
   connectedCallback() {
-    if (this.built) return;
+    // React's pi-kit renders the final markup itself and marks it data-static.
+    if (this.built || this.hasAttribute("data-static")) return;
     this.built = true;
     this.build();
   }

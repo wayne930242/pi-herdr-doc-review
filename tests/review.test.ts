@@ -576,7 +576,7 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
 
 // view "page" renders Markdown in the browser; it is listed as text, and leaves the screen with the browser.
 {
-  const t = fake({ installed: ["nvim", OPENER], files: { "/repo/report.md": "# R", "/repo/notes.txt": "n", "/repo/spec.md": "# S" } });
+  const t = fake({ installed: ["nvim", OPENER], files: { "/repo/report.md": "# R", "/repo/notes.txt": "n", "/repo/spec.md": "# S", "/repo/app.tsx": "export default () => null;" } });
   const review = createDocReview(t.pi, t.deps);
   review.setContext(t.ctx);
   const result = await review.show(CWD, ["report.md"], "Read", "page");
@@ -584,19 +584,23 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   assert.deepEqual(t.calls.filter((call) => call[0] === OPENER).map((call) => call[1]), ["http://127.0.0.1:4000/tok1/files/repo/report.md"]);
   assert.equal(t.state.splits, 0, "no editor pane");
   assert.deepEqual(t.lists().at(-1).map((doc) => [doc.path, doc.kind, doc.onScreen]), [["/repo/report.md", "text", true]]);
+  // A React page opens the same way, as another tab.
+  await review.show(CWD, ["app.tsx"], "Try", "page");
+  assert.equal(t.calls.filter((call) => call[0] === OPENER).at(-1)[1], "http://127.0.0.1:4000/tok1/files/repo/app.tsx");
+  assert.equal(t.state.splits, 0);
   assert.equal(t.state.servers[0].allowed("/repo/report.md"), true);
   // The default view still edits Markdown.
   await review.show(CWD, ["spec.md"], "Review");
   assert.equal(t.state.splits, 1);
   review.closeBrowser();
-  assert.deepEqual(t.lists().at(-1).map((doc) => [doc.path, doc.onScreen]), [["/repo/report.md", false], ["/repo/spec.md", true]]);
-  await assert.rejects(review.show(CWD, ["notes.txt"], "Read", "page"), /view "page" renders Markdown, HTML, and images; open notes\.txt with view "edit"/);
+  assert.deepEqual(t.lists().at(-1).map((doc) => [doc.path, doc.onScreen]), [["/repo/report.md", false], ["/repo/app.tsx", false], ["/repo/spec.md", true]]);
+  await assert.rejects(review.show(CWD, ["notes.txt"], "Read", "page"), /view "page" renders Markdown, React \(\.tsx, \.jsx\), HTML, and images; open notes\.txt with view "edit"/);
 }
 
 // Chawan reads pages from disk, so a Markdown page fails fast there.
 {
   const t = fake({ installed: ["nvim", "cha"], files: { "/repo/report.md": "# R" } });
-  await assert.rejects(createDocReview(t.pi, t.deps).show(CWD, ["report.md"], "Read", "page"), /Chawan cannot render Markdown pages; set PI_HERDR_DOC_REVIEW_BROWSER=external or terminal-browser/);
+  await assert.rejects(createDocReview(t.pi, t.deps).show(CWD, ["report.md"], "Read", "page"), /Chawan cannot render Markdown or React pages; set PI_HERDR_DOC_REVIEW_BROWSER=external or terminal-browser/);
   assert.equal(t.state.splits, 0);
 }
 
