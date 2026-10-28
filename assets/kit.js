@@ -129,10 +129,12 @@ class Form extends Built {
       try {
         if (!window.piDocReview) throw new Error("this page was not opened by show_doc");
         await window.piDocReview.send(fields);
-        status.textContent = "Sent to the agent.";
+        status.textContent = "Sent to the agent. Change an answer and send again to update it.";
       } catch (error) {
-        button.disabled = false;
         status.textContent = `Not sent: ${error.message}`;
+      } finally {
+        // The form stays usable: a changed answer can be sent again.
+        button.disabled = false;
       }
     });
     this.append(make("div", {}, button, status));

@@ -141,11 +141,13 @@ export function Form({ title, submit = "Send to agent", onSent, children }: { ti
     setStatus("Sending…");
     try {
       await send(fields);
-      setStatus("Sent to the agent.");
+      setStatus("Sent to the agent. Change an answer and send again to update it.");
       onSent?.();
     } catch (error) {
-      setBusy(false);
       setStatus(`Not sent: ${(error as Error).message}`);
+    } finally {
+      // The form stays usable: a changed answer can be sent again.
+      setBusy(false);
     }
   };
   return (
