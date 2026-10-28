@@ -31,7 +31,7 @@ Every HTML page served to the default browser or terminal-browser gets a built-i
 | `<pi-options>` of `<pi-option title recommended pros="a; b" cons="c; d">` | alternatives side by side |
 | `<pi-form title submit>` of `<pi-question name label hint required type="single\|multi\|text" other>` with `<pi-choice value note recommended>` | questions whose answers go to the agent when the user sends the form |
 
-A sent `<pi-form>` reaches the agent like any `cgi-bin:pi-answer` form: one message listing each question's `name` and answer, with the form's title first. Pages also get `window.piDocReview.send(fields)` for their own scripts. See [`examples/kit-demo.html`](examples/kit-demo.html).
+A sent `<pi-form>` reaches the agent like any `cgi-bin:pi-answer` form: one message listing each question's `name` and answer, with the form's title first. Pages also get `window.piDocReview.send(fields)` for their own scripts. See [`examples/kit-gallery.html`](examples/kit-gallery.html) for every element beside its markup, and [`examples/kit-demo.html`](examples/kit-demo.html) for a whole page.
 
 ## Browser viewers
 

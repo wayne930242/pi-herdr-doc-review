@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-Hant">
+<meta charset="utf-8">
+<title>show_doc 組件庫</title>
+<h1>show_doc 組件庫</h1>
+<p>show_doc 開的每個 HTML 頁都會自動注入這套 kit，agent 只寫下面這些標籤，不寫 <code>&lt;style&gt;</code> 或 <code>&lt;script&gt;</code>。頁面自己寫的樣式永遠優先（kit 放在 CSS layer 裡）。每節上面是效果，下面是寫法。</p>
+<pi-callout title="這一頁就是示範">這頁的表單是真的：按送出，答案會送回 agent。</pi-callout>
+<h2>基本樣式</h2>
+<p class="muted">不用任何 class：標題、段落、表格、程式碼、引言、details 都有預設樣式，並跟隨系統深淺色。</p>
+<h3>小標題</h3>
+<p>一般段落，<code>inline code</code>，<a href="#">連結</a>。</p>
+<table>
+  <tr><th>項目</th><th>現況</th><th>目標</th></tr>
+  <tr><td>p95 延遲</td><td>820 ms</td><td>500 ms</td></tr>
+</table>
+<details><summary>展開細節</summary><p>收合的補充說明。</p></details>
+<pre><code>&lt;h3&gt;小標題&lt;/h3&gt;
+&lt;p&gt;一般段落，&lt;code&gt;inline code&lt;/code&gt;，&lt;a href=&quot;#&quot;&gt;連結&lt;/a&gt;。&lt;/p&gt;
+&lt;table&gt;
+  &lt;tr&gt;&lt;th&gt;項目&lt;/th&gt;&lt;th&gt;現況&lt;/th&gt;&lt;th&gt;目標&lt;/th&gt;&lt;/tr&gt;
+  &lt;tr&gt;&lt;td&gt;p95 延遲&lt;/td&gt;&lt;td&gt;820 ms&lt;/td&gt;&lt;td&gt;500 ms&lt;/td&gt;&lt;/tr&gt;
+&lt;/table&gt;
+&lt;details&gt;&lt;summary&gt;展開細節&lt;/summary&gt;&lt;p&gt;收合的補充說明。&lt;/p&gt;&lt;/details&gt;</code></pre>
+<h2>pi-callout</h2>
+<p class="muted">提示框。tone 可用 note（預設，藍）、ok（綠）、warn（黃）、risk（紅）；title 可省略。</p>
+<pi-callout title="結論">建議採用 Redis 快取。</pi-callout>
+<pi-callout tone="ok" title="已驗證">測試全部通過。</pi-callout>
+<pi-callout tone="warn" title="注意">需要重新部署。</pi-callout>
+<pi-callout tone="risk" title="風險">正式區資料會被覆寫。</pi-callout>
+<pre><code>&lt;pi-callout title=&quot;結論&quot;&gt;建議採用 Redis 快取。&lt;/pi-callout&gt;
+&lt;pi-callout tone=&quot;ok&quot; title=&quot;已驗證&quot;&gt;測試全部通過。&lt;/pi-callout&gt;
+&lt;pi-callout tone=&quot;warn&quot; title=&quot;注意&quot;&gt;需要重新部署。&lt;/pi-callout&gt;
+&lt;pi-callout tone=&quot;risk&quot; title=&quot;風險&quot;&gt;正式區資料會被覆寫。&lt;/pi-callout&gt;</code></pre>
+<h2>pi-grid + pi-card</h2>
+<p class="muted">摘要卡片，自動排成響應式格線。卡片的 tone 決定頂端色條。</p>
+<pi-grid>
+  <pi-card title="讀取量" tone="ok">每秒 1,200 次</pi-card>
+  <pi-card title="寫入量">每秒 40 次</pi-card>
+  <pi-card title="資料庫" tone="risk">CPU 85%</pi-card>
+</pi-grid>
+<pre><code>&lt;pi-grid&gt;
+  &lt;pi-card title=&quot;讀取量&quot; tone=&quot;ok&quot;&gt;每秒 1,200 次&lt;/pi-card&gt;
+  &lt;pi-card title=&quot;寫入量&quot;&gt;每秒 40 次&lt;/pi-card&gt;
+  &lt;pi-card title=&quot;資料庫&quot; tone=&quot;risk&quot;&gt;CPU 85%&lt;/pi-card&gt;
+&lt;/pi-grid&gt;</code></pre>
+<h2>pi-badge</h2>
+<p class="muted">行內標籤，tone 同上。</p>
+<p>狀態：<pi-badge tone="ok">已上線</pi-badge>
+<pi-badge tone="warn">待審</pi-badge>
+<pi-badge tone="risk">失敗</pi-badge>
+<pi-badge>草稿</pi-badge></p>
+<pre><code>&lt;p&gt;狀態：&lt;pi-badge tone=&quot;ok&quot;&gt;已上線&lt;/pi-badge&gt;
+&lt;pi-badge tone=&quot;warn&quot;&gt;待審&lt;/pi-badge&gt;
+&lt;pi-badge tone=&quot;risk&quot;&gt;失敗&lt;/pi-badge&gt;
+&lt;pi-badge&gt;草稿&lt;/pi-badge&gt;&lt;/p&gt;</code></pre>
+<h2>pi-options + pi-option</h2>
+<p class="muted">方案並排比較。pros、cons 用分號分隔，自動變成 ＋／－ 清單；recommended 加上綠框和徽章，值是徽章文字。</p>
+<pi-options>
+  <pi-option title="Redis 快取" recommended="建議"
+    pros="延遲降到 50 ms 內; 已有叢集" cons="要處理失效">
+    讀多寫少，最適合。
+  </pi-option>
+  <pi-option title="讀取副本" pros="不用改程式" cons="成本加倍">
+    保守做法。
+  </pi-option>
+</pi-options>
+<pre><code>&lt;pi-options&gt;
+  &lt;pi-option title=&quot;Redis 快取&quot; recommended=&quot;建議&quot;
+    pros=&quot;延遲降到 50 ms 內; 已有叢集&quot; cons=&quot;要處理失效&quot;&gt;
+    讀多寫少，最適合。
+  &lt;/pi-option&gt;
+  &lt;pi-option title=&quot;讀取副本&quot; pros=&quot;不用改程式&quot; cons=&quot;成本加倍&quot;&gt;
+    保守做法。
+  &lt;/pi-option&gt;
+&lt;/pi-options&gt;</code></pre>
+<h2>pi-form + pi-question + pi-choice</h2>
+<p class="muted">放在頁尾的決策表單，使用者按送出後，答案整理成一則訊息送回 agent。type 預設：有 pi-choice 是單選，沒有是文字題；multi 為複選。required 必填、hint 說明、other 加一個自填選項；pi-choice 可加 note 小字與 recommended 徽章。</p>
+<pi-form title="請決定" submit="送給 agent">
+  <pi-question name="strategy" label="採用哪個方案？" required>
+    <pi-choice value="redis" recommended="建議" note="兩天可上線">Redis 快取</pi-choice>
+    <pi-choice value="replica">讀取副本</pi-choice>
+  </pi-question>
+  <pi-question name="scope" label="先套用到哪些 API？" type="multi" other="其他">
+    <pi-choice value="orders">訂單</pi-choice>
+    <pi-choice value="products">商品</pi-choice>
+  </pi-question>
+  <pi-question name="notes" label="補充" hint="可留空"></pi-question>
+</pi-form>
+<pre><code>&lt;pi-form title=&quot;請決定&quot; submit=&quot;送給 agent&quot;&gt;
+  &lt;pi-question name=&quot;strategy&quot; label=&quot;採用哪個方案？&quot; required&gt;
+    &lt;pi-choice value=&quot;redis&quot; recommended=&quot;建議&quot; note=&quot;兩天可上線&quot;&gt;Redis 快取&lt;/pi-choice&gt;
+    &lt;pi-choice value=&quot;replica&quot;&gt;讀取副本&lt;/pi-choice&gt;
+  &lt;/pi-question&gt;
+  &lt;pi-question name=&quot;scope&quot; label=&quot;先套用到哪些 API？&quot; type=&quot;multi&quot; other=&quot;其他&quot;&gt;
+    &lt;pi-choice value=&quot;orders&quot;&gt;訂單&lt;/pi-choice&gt;
+    &lt;pi-choice value=&quot;products&quot;&gt;商品&lt;/pi-choice&gt;
+  &lt;/pi-question&gt;
+  &lt;pi-question name=&quot;notes&quot; label=&quot;補充&quot; hint=&quot;可留空&quot;&gt;&lt;/pi-question&gt;
+&lt;/pi-form&gt;</code></pre>
+</html>
