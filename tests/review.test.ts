@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import docReview, { createDocReview, createPageServer, MAX_DIFF_CHARS } from "../src/index.ts";
+import docReview, { createDocReview, createPageServer, MAX_DIFF_CHARS, OPENER } from "../src/index.ts";
 
 const SCRATCH = "/tmp/review-1";
 const CONTROL = `${SCRATCH}/commands.vim`;
@@ -64,6 +64,7 @@ function fake(options = {}) {
         const browsers = state.listed ? [{ key: "777-1", pane: { tab: "w:t1", pane: `w:p${state.splits + 1}` } }, { key: "888-1", pane: { tab: "w:t1", pane: "w:p99" } }] : [];
         return { status: 0, stdout: JSON.stringify({ browsers }), stderr: "" };
       }
+      if (command === OPENER) return { status: state.openerFails ? 1 : 0, stdout: "", stderr: state.openerFails ? "no browser" : "" };
       if (command === "terminal-browser" && args[0] === "new-tab") return { status: 0, stdout: "{}", stderr: "" };
       if (command === "diff") {
         const before = fs.get(args[5]);
@@ -442,7 +443,7 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   assert.deepEqual(t.state.removed, [SCRATCH]);
 
   const none = fake({ installed: ["nvim"], files: { "/repo/page.html": "<p>x</p>" } });
-  await assert.rejects(createDocReview(none.pi, none.deps).show(CWD, ["page.html"], "Look"), /needs Chawan \(cha\) or terminal-browser on PATH/);
+  await assert.rejects(createDocReview(none.pi, none.deps).show(CWD, ["page.html"], "Look"), /needs open, Chawan \(cha\), or terminal-browser on PATH|needs xdg-open, Chawan/);
 }
 
 // Images open rendered in the browser pane, never in the editor, and stay off the document list.
@@ -544,6 +545,35 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   assert.equal(server.allowed("/repo/report.html"), false, "a closed browser's pages are no longer served");
 }
 
+// The default browser comes first: pages open as its tabs from the page server, with no Herdr pane.
+{
+  const t = fake({ installed: ["nvim", OPENER, "cha"], files: { "/repo/a.html": "<p>a</p>", "/repo/b.html": "<p>b</p>" } });
+  const review = createDocReview(t.pi, t.deps);
+  review.setContext(t.ctx);
+  const result = await review.show(CWD, ["a.html", "b.html"], "Read");
+  assert.match(result.text, /a\.html, b\.html in the default browser \(view-only, one tab per page\)/);
+  assert.equal(t.state.splits, 0, "no pane opens");
+  const opened = () => t.calls.filter((call) => call[0] === OPENER).map((call) => call[1]);
+  assert.deepEqual(opened(), ["http://127.0.0.1:4000/tok1/files/repo/a.html", "http://127.0.0.1:4000/tok1/files/repo/b.html"]);
+  // Showing an open page again reloads it instead of opening another tab; a new page opens one.
+  t.fs.set("/repo/c.html", "c");
+  await review.show(CWD, ["a.html", "c.html"], "More");
+  assert.equal(opened().length, 3);
+  assert.equal(t.state.servers.length, 1);
+  t.timers.at(-1).tick();
+  assert.equal(t.state.servers[0].closed, false, "the pane check leaves the default browser's pages served");
+  t.fs.set("/repo/a.html", "<p>a2</p>");
+  review.agentWrote("/repo/a.html");
+  assert.deepEqual(t.state.servers[0].reloads, ["/repo/a.html"]);
+  review.closeBrowser();
+  assert.equal(t.state.servers[0].closed, true);
+  assert.deepEqual(t.state.removed, [SCRATCH]);
+
+  const failing = fake({ installed: [OPENER], files: { "/repo/a.html": "a" } });
+  failing.state.openerFails = true;
+  await assert.rejects(createDocReview(failing.pi, failing.deps).show(CWD, ["a.html"], "Look"), /failed: no browser/);
+}
+
 // A browser the user quits stops its page server at the next pane check, not at the next show.
 {
   const t = fake({ installed: ["terminal-browser"], files: { "/repo/a.html": "a" } });
@@ -580,7 +610,7 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   await assert.rejects(createDocReview(missing.pi, missing.deps).show(CWD, ["page.html"], "Look"), /PI_HERDR_DOC_REVIEW_BROWSER=cha, but cha is not on PATH/);
   assert.equal(missing.state.splits, 0);
   const other = fake({ browser: "lynx", installed: ["lynx"], files });
-  await assert.rejects(createDocReview(other.pi, other.deps).show(CWD, ["page.html"], "Look"), /=lynx is not supported; use cha or terminal-browser/);
+  await assert.rejects(createDocReview(other.pi, other.deps).show(CWD, ["page.html"], "Look"), /=lynx is not supported; use external or cha or terminal-browser/);
 }
 
 // A terminal-browser that never lists itself fails the second page instead of opening it elsewhere.

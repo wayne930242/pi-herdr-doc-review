@@ -59,9 +59,15 @@ export const IMAGE_FILE = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
 export const BROWSER_ENV = "PI_HERDR_DOC_REVIEW_BROWSER";
 export const TERMINAL_BROWSER = "terminal-browser";
 export const CHAWAN = "cha";
+/** The user's default browser outside the terminal, opened with {@link OPENER}. */
+export const EXTERNAL = "external";
+/** The command that opens a URL in the default browser. */
+export const OPENER = process.platform === "darwin" ? "open" : "xdg-open";
 /** The browsers HTML review supports, in the order tried when PI_HERDR_DOC_REVIEW_BROWSER is unset. */
-export const BROWSERS = [CHAWAN, TERMINAL_BROWSER];
-const BROWSER_NAMES: Record<string, string> = { [TERMINAL_BROWSER]: "terminal-browser", [CHAWAN]: "Chawan" };
+export const BROWSERS = [EXTERNAL, CHAWAN, TERMINAL_BROWSER];
+const BROWSER_NAMES: Record<string, string> = { [TERMINAL_BROWSER]: "terminal-browser", [CHAWAN]: "Chawan", [EXTERNAL]: "the default browser" };
+/** The command each browser needs on PATH. */
+const browserCommand = (program: string): string => (program === EXTERNAL ? OPENER : program);
 /** The local CGI script an HTML form names as `action="cgi-bin:pi-answer"` to send its fields to the agent. */
 export const ANSWER_CGI = "pi-answer";
 /** The document contract on pi's event bus; every payload carries `version`. */
@@ -552,7 +558,8 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     return Number.isInteger(pid) && pid > 0 && deps.pidAlive(pid);
   };
   const viewerAlive = (): boolean => viewer !== undefined && alive(viewer.ready);
-  const browserAlive = (): boolean => browser !== undefined && alive(browser.ready);
+  // The default browser runs outside Herdr, so its pages count as open until the session closes them.
+  const browserAlive = (): boolean => browser !== undefined && (browser.program === EXTERNAL || alive(browser.ready));
   /** Queues an Ex command for the editor, or a JavaScript line for the browser; it runs on the next poll. */
   const command = (target: { control: string }, line: string): void => deps.appendFile(target.control, `${line}\n`);
   /** Reloads the HTML pages whose content changed since the browser last loaded them. */
@@ -721,7 +728,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     if (!current) return;
     current.stop();
     // The pane's shell removes the scratch directory once the browser exits.
-    if (alive(current.ready)) current.quit();
+    if (current.program !== EXTERNAL && alive(current.ready)) current.quit();
     else deps.removeDir(current.dir);
   };
 
@@ -744,11 +751,12 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
   const chooseBrowser = (): string => {
     if (deps.browser) {
       if (!BROWSERS.includes(deps.browser)) throw new Error(`${BROWSER_ENV}=${deps.browser} is not supported; use ${BROWSERS.join(" or ")}`);
-      if (!deps.onPath(deps.browser)) throw new Error(`${BROWSER_ENV}=${deps.browser}, but ${deps.browser} is not on PATH`);
+      const needed = browserCommand(deps.browser);
+      if (!deps.onPath(needed)) throw new Error(`${BROWSER_ENV}=${deps.browser}, but ${needed} is not on PATH`);
       return deps.browser;
     }
-    const found = BROWSERS.find((program) => deps.onPath(program));
-    if (!found) throw new Error(`HTML review needs Chawan (${CHAWAN}) or terminal-browser on PATH`);
+    const found = BROWSERS.find((program) => deps.onPath(browserCommand(program)));
+    if (!found) throw new Error(`HTML review needs ${OPENER}, Chawan (${CHAWAN}), or terminal-browser on PATH`);
     return found;
   };
 
@@ -854,11 +862,38 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     return [terminalBrowser, `${TERMINAL_BROWSER} open ${shellQuote(url(first))} --no-merge`];
   };
 
+  /** Opens pages from the page server in the user's default browser; no Herdr pane is involved. */
+  const startExternal = (server: PageServer): Browser => {
+    const url = (path: string) => `${server.base}/files${pathToFileURL(path).pathname}`;
+    return {
+      program: EXTERNAL,
+      pane: "",
+      dir: deps.makeDir(),
+      ready: "",
+      open: async (more) => {
+        for (const path of more) {
+          const opened = deps.run(OPENER, [url(path)]);
+          if (opened.status !== 0) throw new Error(`${OPENER} failed: ${(opened.stderr || opened.stdout).trim()}`);
+        }
+      },
+      reload: (path) => server.reload(path),
+      // The user closes the browser tabs; the session only stops serving them.
+      quit: () => undefined,
+      stop: server.close,
+      started: true,
+    };
+  };
+
   /** Starts a browser on `paths`; returns the pages it opened, since terminal-browser starts on the first alone. */
   const launchBrowser = async (cwd: string, paths: string[]): Promise<string[]> => {
     closeBrowser();
     const program = chooseBrowser();
     for (const path of paths) servable.add(path);
+    if (program === EXTERNAL) {
+      browser = startExternal(await deps.servePages(answered, canServe));
+      // showHtml opens every page as a tab of its own.
+      return [];
+    }
     // The server starts before the pane opens, so a server that cannot start leaves no empty pane.
     const server = program === TERMINAL_BROWSER ? await deps.servePages(answered, canServe) : undefined;
     let dir: string | undefined;
@@ -971,7 +1006,9 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     const opened = [
       ...(texts.length > 0 ? [`${list(texts)} in Herdr pane ${viewer?.pane} (editable ${viewer?.editor}, one row per document)`] : []),
       ...(htmls.length > 0 && browser
-        ? [`${list(htmls)} in Herdr pane ${browser.pane} (rendered by ${BROWSER_NAMES[browser.program]}, view-only, one ${browser.program === CHAWAN ? "buffer" : "tab"} per page)`]
+        ? browser.program === EXTERNAL
+          ? [`${list(htmls)} in the default browser (view-only, one tab per page)`]
+          : [`${list(htmls)} in Herdr pane ${browser.pane} (rendered by ${BROWSER_NAMES[browser.program]}, view-only, one ${browser.program === CHAWAN ? "buffer" : "tab"} per page)`]
         : []),
     ];
     const feedback = texts.length > 0 ? " Their saved edits will reach you as review feedback." : "";
@@ -1103,8 +1140,8 @@ export default function docReview(pi: ExtensionAPI, deps: DocReviewDeps = defaul
       description:
         "Open documents the user should review in a pane beside this session (Herdr only; elsewhere it returns the paths to name to the user). " +
         "Text documents open in one editable nvim or vim pane, one row per document, and the user's saved edits come back to you as a diff. " +
-        "HTML files (.html, .htm) and images (png, jpg, gif, webp, bmp, svg) open rendered in one browser pane, one buffer or tab per page: Chawan, which runs no JavaScript, when installed, otherwise terminal-browser (Chromium, runs JavaScript). Other binary files are refused. " +
-        "Keep scripts, styles, and images inline or in the page's directory: terminal-browser loads nothing from a CDN or other site, nor from above the page's directory. " +
+        "HTML files (.html, .htm) and images (png, jpg, gif, webp, bmp, svg) open rendered in one browser pane, one tab per page of the user's default browser (or a Chawan or terminal-browser pane when the user chose one). Other binary files are refused. " +
+        "Keep scripts, styles, and images inline or in the page's directory: the page server loads nothing from a CDN or other site, nor from above the page's directory. " +
         "Pages are for reading: ask the user's questions with your question tool, not in a form on the page. " +
         "Use it whenever the user must understand or confirm written material: a spec, design, plan, report, or comparison; write material meant for understanding as HTML. " +
         "It returns at once without waiting for the user. Documents stay open and reload when you edit them.",
