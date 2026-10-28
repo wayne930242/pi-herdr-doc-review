@@ -32,7 +32,7 @@
 &lt;pi-callout tone=&quot;warn&quot; title=&quot;注意&quot;&gt;需要重新部署。&lt;/pi-callout&gt;
 &lt;pi-callout tone=&quot;risk&quot; title=&quot;風險&quot;&gt;正式區資料會被覆寫。&lt;/pi-callout&gt;</code></pre>
 <h2>pi-grid + pi-card</h2>
-<p class="muted">摘要卡片，自動排成響應式格線。卡片的 tone 決定頂端色條。</p>
+<p class="muted">摘要卡片，自動排成響應式格線。卡片的 tone 顯示為標題前的色點。</p>
 <pi-grid>
   <pi-card title="讀取量" tone="ok">每秒 1,200 次</pi-card>
   <pi-card title="寫入量">每秒 40 次</pi-card>
@@ -54,7 +54,7 @@
 &lt;pi-badge tone=&quot;risk&quot;&gt;失敗&lt;/pi-badge&gt;
 &lt;pi-badge&gt;草稿&lt;/pi-badge&gt;&lt;/p&gt;</code></pre>
 <h2>pi-options + pi-option</h2>
-<p class="muted">方案並排比較。pros、cons 用分號分隔，自動變成 ＋／－ 清單；recommended 加上綠框和徽章，值是徽章文字。</p>
+<p class="muted">方案並排比較。pros、cons 用分號分隔，自動變成 ＋／－ 清單；recommended 加上綠色外框、淡綠底和徽章，值是徽章文字。</p>
 <pi-options>
   <pi-option title="Redis 快取" recommended="建議"
     pros="延遲降到 50 ms 內; 已有叢集" cons="要處理失效">

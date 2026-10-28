@@ -46,7 +46,7 @@
   code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--pi-surface); padding: 0.1em 0.35em; border-radius: 4px; }
   pre { background: var(--pi-surface); border: 1px solid var(--pi-border); border-radius: var(--pi-radius); padding: 0.9rem 1rem; overflow: auto; }
   pre code { background: none; padding: 0; }
-  blockquote { margin-left: 0; padding: 0.2rem 1rem; border-left: 4px solid var(--pi-border); color: var(--pi-muted); }
+  blockquote { margin-left: 0; padding: 0.5rem 1rem; border-radius: var(--pi-radius); background: var(--pi-surface); color: var(--pi-muted); }
   hr { border: 0; border-top: 1px solid var(--pi-border); margin: 2rem 0; }
   table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
   th, td { border: 1px solid var(--pi-border); padding: 0.45rem 0.75rem; text-align: left; vertical-align: top; }
@@ -56,8 +56,10 @@
   img, svg { max-width: 100%; height: auto; }
 
   /* <pi-callout tone="note|ok|warn|risk" title="…"> */
-  pi-callout { display: block; margin: 0 0 1rem; padding: 0.75rem 1rem; border-left: 4px solid var(--pi-tone, var(--pi-note)); border-radius: var(--pi-radius); background: var(--pi-surface); }
+  /* Tone shows through a tint and the title's colour; borders stay uniform on all four sides. */
+  pi-callout { display: block; margin: 0 0 1rem; padding: 0.75rem 1rem; border: 1px solid color-mix(in srgb, var(--pi-tone, var(--pi-note)) 35%, transparent); border-radius: var(--pi-radius); background: color-mix(in srgb, var(--pi-tone, var(--pi-note)) 10%, var(--pi-bg)); }
   pi-callout > :last-child, pi-card > :last-child, pi-option > :last-child { margin-bottom: 0; }
+  [tone="note"] { --pi-tone: var(--pi-note); }
   [tone="ok"] { --pi-tone: var(--pi-ok); }
   [tone="warn"] { --pi-tone: var(--pi-warn); }
   [tone="risk"] { --pi-tone: var(--pi-risk); }
@@ -66,7 +68,8 @@
 
   /* <pi-grid> of <pi-card title="…"> */
   pi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin: 0 0 1rem; }
-  pi-card, pi-option { display: block; margin: 0 0 1rem; padding: 1rem; border: 1px solid var(--pi-border); border-top: 3px solid var(--pi-tone, var(--pi-border)); border-radius: var(--pi-radius); }
+  pi-card, pi-option { display: block; margin: 0 0 1rem; padding: 1rem; border: 1px solid var(--pi-border); border-radius: var(--pi-radius); }
+  pi-card[tone] > .pi-title::before { content: ""; display: inline-block; width: 0.6em; height: 0.6em; margin-right: 0.45em; border-radius: 50%; background: var(--pi-tone); vertical-align: 0.05em; }
   pi-grid > pi-card, pi-options > pi-option { margin: 0; }
 
   /* <pi-badge tone="…"> */
@@ -74,7 +77,7 @@
 
   /* <pi-options> of <pi-option title="…" recommended> */
   pi-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin: 0 0 1rem; }
-  pi-option[recommended] { border-color: var(--pi-ok); border-top-color: var(--pi-ok); }
+  pi-option[recommended] { border-color: var(--pi-ok); background: color-mix(in srgb, var(--pi-ok) 6%, var(--pi-bg)); }
   .pi-pros, .pi-cons { padding-left: 1.2rem; margin: 0.5rem 0 0; }
   .pi-pros li::marker { content: "+  "; color: var(--pi-ok); }
   .pi-cons li::marker { content: "−  "; color: var(--pi-risk); }
