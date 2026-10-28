@@ -364,6 +364,12 @@ export function answerScript(answers: string): string {
   ].join("\n");
 }
 
+/** The page kit the server adds to every HTML page, by the name it is served under `<base>/kit/`. */
+export const KIT_FILES: Record<string, string> = {
+  "kit.css": fileURLToPath(new URL("../assets/kit.css", import.meta.url)),
+  "kit.js": fileURLToPath(new URL("../assets/kit.js", import.meta.url)),
+};
+
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".htm": "text/html; charset=utf-8",
@@ -384,12 +390,15 @@ const CONTENT_TYPES: Record<string, string> = {
 };
 
 /**
- * The script the page server adds to each HTML page: a form whose action is `cgi-bin:pi-answer`
- * posts its fields to the server instead of leaving the page, and the page reloads when the server
- * sends `reload` for it.
+ * What the page server adds to each HTML page: the page kit ({@link KIT_FILES}), and a script by
+ * which a form whose action is `cgi-bin:pi-answer` posts its fields to the server instead of leaving
+ * the page, `window.piDocReview.send(fields)` does the same for the kit's `<pi-form>`, and the page
+ * reloads when the server sends `reload` for it.
  */
 export function pageScript(base: string): string {
   return [
+    `<link rel="stylesheet" href="${base}/kit/kit.css">`,
+    `<script type="module" src="${base}/kit/kit.js"></script>`,
     "<script>(() => {",
     `  const base = ${JSON.stringify(base)};`,
     "  const note = (text) => {",
@@ -399,12 +408,16 @@ export function pageScript(base: string): string {
     "    document.body.append(box);",
     "    setTimeout(() => box.remove(), 4000);",
     "  };",
+    '  const send = (fields) => fetch(base + "/answer", { method: "POST", body: new URLSearchParams(fields).toString() }).then((response) => {',
+    '    if (!response.ok) throw new Error("HTTP " + response.status);',
+    "  });",
+    "  window.piDocReview = { send };",
     '  document.addEventListener("submit", (event) => {',
     "    const form = event.target;",
     `    if (!(form instanceof HTMLFormElement) || form.getAttribute("action") !== ${JSON.stringify(`cgi-bin:${ANSWER_CGI}`)}) return;`,
     "    event.preventDefault();",
-    '    fetch(base + "/answer", { method: "POST", body: new URLSearchParams(new FormData(form, event.submitter)).toString() }).then(',
-    '      (response) => note(response.ok ? "Sent to the agent." : "Not sent: HTTP " + response.status),',
+    '    send(new FormData(form, event.submitter)).then(',
+    '      () => note("Sent to the agent."),',
     '      (error) => note("Not sent: " + error.message),',
     "    );",
     "  }, true);",
@@ -472,6 +485,12 @@ export function createPageServer(onAnswer: (query: string) => void, allowed: (pa
       streams.set(page, open.add(response));
       response.on("close", () => open.delete(response));
       return;
+    }
+    if (url.pathname.startsWith(`${prefix}/kit/`)) {
+      const kit = KIT_FILES[url.pathname.slice(`${prefix}/kit/`.length)];
+      if (!kit) return finish(response, 404);
+      response.writeHead(200, { "content-type": CONTENT_TYPES[extname(kit)] ?? "text/plain", "cache-control": "no-store" });
+      return void response.end(readFileSync(kit));
     }
     const requested = pathOf(url.pathname);
     if (!requested) return finish(response, 404);
@@ -1142,7 +1161,11 @@ export default function docReview(pi: ExtensionAPI, deps: DocReviewDeps = defaul
         "Text documents open in one editable nvim or vim pane, one row per document, and the user's saved edits come back to you as a diff. " +
         "HTML files (.html, .htm) and images (png, jpg, gif, webp, bmp, svg) open rendered in one browser pane, one tab per page of the user's default browser (or a Chawan or terminal-browser pane when the user chose one). Other binary files are refused. " +
         "Keep scripts, styles, and images inline or in the page's directory: the page server loads nothing from a CDN or other site, nor from above the page's directory. " +
-        "Pages are for reading: ask the user's questions with your question tool, not in a form on the page. " +
+        "Every page shown in the default browser or terminal-browser gets a built-in kit, so write bare semantic HTML with no <style> or <script>: " +
+        "base styles for headings, tables, code, details, and dark mode; <pi-callout tone=\"note|ok|warn|risk\" title>; <pi-grid> of <pi-card title tone>; <pi-badge tone>; " +
+        "<pi-options> of <pi-option title recommended pros=\"a; b\" cons=\"c; d\">body</pi-option> to compare alternatives; " +
+        "and <pi-form title submit=\"Send\"> holding <pi-question name label hint required type=\"single|multi|text\" other=\"Other\"> with <pi-choice value note recommended>Label</pi-choice> children, whose answers reach you as a message when the user sends the form. " +
+        "Put decisions that belong to the document (several questions, or a choice after a comparison) in a <pi-form> at its end; ask a single short question with your question tool. " +
         "Use it whenever the user must understand or confirm written material: a spec, design, plan, report, or comparison; write material meant for understanding as HTML. " +
         "It returns at once without waiting for the user. Documents stay open and reload when you edit them.",
       parameters: Type.Object({

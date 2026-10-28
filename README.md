@@ -18,6 +18,21 @@ Review the documents your [pi](https://pi.dev) agent writes without leaving the 
 
 Outside Herdr, `show_doc` opens nothing and tells the agent to name the files to you instead.
 
+## Page kit
+
+Every HTML page served to the default browser or terminal-browser gets a built-in kit, so the agent writes bare semantic HTML and no styles or scripts. The kit's stylesheet sits in a CSS layer, so any style a page declares itself wins. Chawan loads pages from disk and gets no kit.
+
+| Element | Use |
+| --- | --- |
+| base styles | headings, tables, code, `details`, light and dark mode |
+| `<pi-callout tone="note\|ok\|warn\|risk" title>` | a highlighted note |
+| `<pi-grid>` of `<pi-card title tone>` | a grid of summary cards |
+| `<pi-badge tone>` | an inline label |
+| `<pi-options>` of `<pi-option title recommended pros="a; b" cons="c; d">` | alternatives side by side |
+| `<pi-form title submit>` of `<pi-question name label hint required type="single\|multi\|text" other>` with `<pi-choice value note recommended>` | questions whose answers go to the agent when the user sends the form |
+
+A sent `<pi-form>` reaches the agent like any `cgi-bin:pi-answer` form: one message listing each question's `name` and answer, with the form's title first. Pages also get `window.piDocReview.send(fields)` for their own scripts. See [`examples/kit-demo.html`](examples/kit-demo.html).
+
 ## Browser viewers
 
 Other extensions can show the same documents somewhere else, a browser page for one, through pi's event bus (`pi.events`). Every payload carries `version: 1`. Nothing here changes the panes: the browser, the editor, and saving behave as above.

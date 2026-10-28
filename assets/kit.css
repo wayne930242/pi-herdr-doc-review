@@ -1,0 +1,100 @@
+/* pi-herdr-doc-review page kit. Layered, so any style the page declares itself wins. */
+@layer pi-kit {
+  :root {
+    color-scheme: light dark;
+    --pi-fg: #1f2328;
+    --pi-muted: #59636e;
+    --pi-bg: #ffffff;
+    --pi-surface: #f6f8fa;
+    --pi-border: #d1d9e0;
+    --pi-accent: #0969da;
+    --pi-note: #0969da;
+    --pi-ok: #1a7f37;
+    --pi-warn: #9a6700;
+    --pi-risk: #cf222e;
+    --pi-radius: 8px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --pi-fg: #e6edf3;
+      --pi-muted: #9198a1;
+      --pi-bg: #0d1117;
+      --pi-surface: #151b23;
+      --pi-border: #3d444d;
+      --pi-accent: #4493f8;
+      --pi-note: #4493f8;
+      --pi-ok: #3fb950;
+      --pi-warn: #d29922;
+      --pi-risk: #f85149;
+    }
+  }
+
+  html { background: var(--pi-bg); color: var(--pi-fg); }
+  body {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem 4rem;
+    font: 16px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+  }
+  h1, h2, h3, h4 { line-height: 1.3; margin: 2rem 0 0.75rem; }
+  h1 { font-size: 1.9rem; margin-top: 0; }
+  h2 { font-size: 1.4rem; padding-bottom: 0.3rem; border-bottom: 1px solid var(--pi-border); }
+  h3 { font-size: 1.15rem; }
+  p, ul, ol, table, pre, blockquote, details { margin: 0 0 1rem; }
+  a { color: var(--pi-accent); }
+  small, .muted { color: var(--pi-muted); }
+  code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--pi-surface); padding: 0.1em 0.35em; border-radius: 4px; }
+  pre { background: var(--pi-surface); border: 1px solid var(--pi-border); border-radius: var(--pi-radius); padding: 0.9rem 1rem; overflow: auto; }
+  pre code { background: none; padding: 0; }
+  blockquote { margin-left: 0; padding: 0.2rem 1rem; border-left: 4px solid var(--pi-border); color: var(--pi-muted); }
+  hr { border: 0; border-top: 1px solid var(--pi-border); margin: 2rem 0; }
+  table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+  th, td { border: 1px solid var(--pi-border); padding: 0.45rem 0.75rem; text-align: left; vertical-align: top; }
+  th { background: var(--pi-surface); }
+  details { border: 1px solid var(--pi-border); border-radius: var(--pi-radius); padding: 0.5rem 1rem; }
+  summary { cursor: pointer; font-weight: 600; }
+  img, svg { max-width: 100%; height: auto; }
+
+  /* <pi-callout tone="note|ok|warn|risk" title="…"> */
+  pi-callout { display: block; margin: 0 0 1rem; padding: 0.75rem 1rem; border-left: 4px solid var(--pi-tone, var(--pi-note)); border-radius: var(--pi-radius); background: var(--pi-surface); }
+  pi-callout > :last-child, pi-card > :last-child, pi-option > :last-child { margin-bottom: 0; }
+  [tone="ok"] { --pi-tone: var(--pi-ok); }
+  [tone="warn"] { --pi-tone: var(--pi-warn); }
+  [tone="risk"] { --pi-tone: var(--pi-risk); }
+  .pi-title { display: block; font-weight: 700; margin-bottom: 0.35rem; }
+  pi-callout > .pi-title { color: var(--pi-tone, var(--pi-note)); }
+
+  /* <pi-grid> of <pi-card title="…"> */
+  pi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin: 0 0 1rem; }
+  pi-card, pi-option { display: block; margin: 0 0 1rem; padding: 1rem; border: 1px solid var(--pi-border); border-top: 3px solid var(--pi-tone, var(--pi-border)); border-radius: var(--pi-radius); }
+  pi-grid > pi-card, pi-options > pi-option { margin: 0; }
+
+  /* <pi-badge tone="…"> */
+  pi-badge { display: inline-block; padding: 0 0.55em; border-radius: 999px; font-size: 0.8em; font-weight: 600; line-height: 1.7; color: var(--pi-bg); background: var(--pi-tone, var(--pi-muted)); vertical-align: middle; }
+
+  /* <pi-options> of <pi-option title="…" recommended> */
+  pi-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin: 0 0 1rem; }
+  pi-option[recommended] { border-color: var(--pi-ok); border-top-color: var(--pi-ok); }
+  .pi-pros, .pi-cons { padding-left: 1.2rem; margin: 0.5rem 0 0; }
+  .pi-pros li::marker { content: "+  "; color: var(--pi-ok); }
+  .pi-cons li::marker { content: "−  "; color: var(--pi-risk); }
+
+  /* <pi-form> of <pi-question name="…" label="…" type="single|multi|text"> with <pi-choice value="…"> */
+  pi-form { display: block; margin: 2rem 0 1rem; padding: 1rem 1.25rem; border: 2px solid var(--pi-accent); border-radius: var(--pi-radius); }
+  pi-question { display: block; margin: 0 0 1.25rem; }
+  pi-question > .pi-title { margin-bottom: 0.5rem; }
+  pi-question[required] > .pi-title::after { content: " *"; color: var(--pi-risk); }
+  pi-form > .pi-title { font-size: 1.2rem; margin-bottom: 1rem; }
+  pi-question .pi-hint { display: block; color: var(--pi-muted); font-size: 0.9em; margin: -0.3rem 0 0.5rem; }
+  pi-choice { display: none; }
+  .pi-choice { display: flex; gap: 0.6rem; align-items: flex-start; padding: 0.5rem 0.75rem; margin: 0 0 0.4rem; border: 1px solid var(--pi-border); border-radius: var(--pi-radius); cursor: pointer; }
+  .pi-choice:has(input:checked) { border-color: var(--pi-accent); background: var(--pi-surface); }
+  .pi-choice input { margin-top: 0.35rem; }
+  .pi-choice small { display: block; }
+  .pi-choice pi-badge { margin-left: 0.4rem; }
+  pi-form textarea, pi-form input[type="text"] { width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--pi-bg); border: 1px solid var(--pi-border); border-radius: var(--pi-radius); padding: 0.5rem 0.75rem; }
+  pi-form textarea { min-height: 5rem; }
+  pi-form button { font: inherit; font-weight: 600; color: #fff; background: var(--pi-accent); border: 0; border-radius: var(--pi-radius); padding: 0.55rem 1.4rem; cursor: pointer; }
+  pi-form button:disabled { opacity: 0.6; cursor: default; }
+  .pi-status { margin-left: 0.75rem; color: var(--pi-muted); }
+}

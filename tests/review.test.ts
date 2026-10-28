@@ -626,6 +626,8 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   assert.deepEqual(t.calls.filter((call) => call[1] === "new-tab").map((call) => call.at(-1)), ["http://127.0.0.1:4000/tok1/files/repo/b.html"]);
 }
 
+const origin0 = (base) => new URL(base).origin;
+
 // The real page server: files with the page script, answers, reload events, and nothing without the token.
 {
   const dir = mkdtempSync(join(tmpdir(), "doc-review-server-"));
@@ -641,7 +643,16 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
     assert.equal(page.headers.get("content-type"), "text/html; charset=utf-8");
     assert.equal(page.headers.get("content-security-policy"), "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; form-action 'self'", "pages load nothing from elsewhere");
     const html = await page.text();
-    assert.ok(html.startsWith('<form action="cgi-bin:pi-answer"></form>\n<script>'), "the page script follows the page");
+    assert.ok(html.startsWith(`<form action="cgi-bin:pi-answer"></form>\n<link rel="stylesheet" href="${server.base}/kit/kit.css">\n<script type="module" src="${server.base}/kit/kit.js"></script>\n<script>`), "the kit and page script follow the page");
+    const css = await fetch(`${server.base}/kit/kit.css`);
+    assert.equal(css.headers.get("content-type"), "text/css; charset=utf-8");
+    assert.match(await css.text(), /@layer pi-kit/, "the kit's styles sit in a layer the page's own styles beat");
+    const js = await fetch(`${server.base}/kit/kit.js`);
+    assert.equal(js.headers.get("content-type"), "text/javascript; charset=utf-8");
+    assert.match(await js.text(), /customElements\.define/);
+    assert.equal((await fetch(`${server.base}/kit/../files/etc/hosts`)).status, 404);
+    assert.equal((await fetch(`${server.base}/kit/index.ts`)).status, 404, "the kit serves its own files only");
+    assert.equal((await fetch(`${origin0(server.base)}/kit/kit.css`)).status, 404, "not without the token");
     assert.ok(html.includes(JSON.stringify(server.base)));
     const pic = await fetch(`${server.base}/files${pathToFileURL(join(dir, "pic.png")).pathname}`);
     assert.equal(pic.headers.get("content-type"), "image/png");

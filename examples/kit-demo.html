@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-Hant">
+<meta charset="utf-8">
+<title>Kit demo</title>
+<h1>快取策略選擇</h1>
+<p>這頁只寫語意 HTML，樣式與表單行為都來自 show_doc 注入的 kit。</p>
+
+<pi-callout tone="warn" title="注意">目前 API p95 延遲 820 ms，超過 SLO 的 500 ms。</pi-callout>
+
+<h2>現況</h2>
+<pi-grid>
+  <pi-card title="讀取量" tone="ok">每秒 1,200 次，九成是同一批資料。</pi-card>
+  <pi-card title="寫入量">每秒 40 次 <pi-badge tone="note">低</pi-badge></pi-card>
+  <pi-card title="資料庫" tone="risk">CPU 85%，已接近上限。</pi-card>
+</pi-grid>
+
+<h2>方案比較</h2>
+<pi-options>
+  <pi-option title="Redis 快取" recommended pros="延遲降到 50 ms 內; 已有 Redis 叢集" cons="要處理失效">讀多寫少，最適合。</pi-option>
+  <pi-option title="資料庫讀取副本" pros="不用改程式" cons="成本加倍; 延遲只降一半">保守做法。</pi-option>
+</pi-options>
+
+<table>
+  <tr><th>項目</th><th>Redis</th><th>副本</th></tr>
+  <tr><td>月成本</td><td>$40</td><td>$300</td></tr>
+</table>
+
+<pi-form title="請決定" submit="送給 agent">
+  <pi-question name="strategy" label="採用哪個方案？" required>
+    <pi-choice value="redis" recommended="建議" note="兩天內可上線">Redis 快取</pi-choice>
+    <pi-choice value="replica">資料庫讀取副本</pi-choice>
+  </pi-question>
+  <pi-question name="scope" label="先套用到哪些 API？" type="multi" other="其他">
+    <pi-choice value="orders">訂單</pi-choice>
+    <pi-choice value="products">商品</pi-choice>
+  </pi-question>
+  <pi-question name="notes" label="補充" hint="可留空"></pi-question>
+</pi-form>
+</html>
