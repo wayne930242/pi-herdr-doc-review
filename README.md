@@ -18,6 +18,27 @@ Review the documents your [pi](https://pi.dev) agent writes without leaving the 
 
 Outside Herdr, `show_doc` opens nothing and tells the agent to name the files to you instead.
 
+## Markdown pages
+
+`show_doc` with `view: "page"` renders a Markdown file in the browser instead of opening it in the editor; the default, `view: "edit"`, keeps the editor and its review diffs. The page server renders it on every load (with [markdown-it](https://github.com/markdown-it/markdown-it)), so an agent's edit reloads the rendered page. Chawan reads files from disk and cannot show Markdown pages; the default browser and terminal-browser can.
+
+On top of CommonMark, tables, and raw HTML:
+
+| Markdown | Becomes |
+| --- | --- |
+| `> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`, with an optional title after the marker | a `<pi-callout>` |
+| a `mermaid` code block | an SVG diagram drawn on the server by [beautiful-mermaid](https://github.com/lukilabs/beautiful-mermaid), in the page's colours |
+| a `diff` code block | added, removed, and hunk lines coloured |
+| a `cards` block: YAML list of `{title, tone, body}` | a `<pi-grid>` of `<pi-card>` |
+| an `options` block: YAML list of `{title, recommended, body, pros, cons}` | a `<pi-options>` comparison |
+| a `form` block: `{title, submit, questions: [{name, label, hint, required, type, other, choices}]}`, each choice a label or `{value, label, note, recommended}` | a `<pi-form>` |
+
+`body` fields are Markdown. A block that cannot be drawn shows its error and source in a red callout instead of failing the page. See [`examples/markdown-demo.md`](examples/markdown-demo.md).
+
+## Feedback panel
+
+Every page served to the default browser or terminal-browser has a feedback button. Selecting text offers a comment on that passage; the panel collects these comments and an overall note, and sends them to the agent in one message that quotes each passage above its comment. Drafts are kept per page in the tab's session storage, so they survive the reload an agent's edit causes. Images enlarge on click.
+
 ## Page kit
 
 Every HTML page served to the default browser or terminal-browser gets a built-in kit, so the agent writes bare semantic HTML and no styles or scripts. The kit's stylesheet sits in a CSS layer, so any style a page declares itself wins. Chawan loads pages from disk and gets no kit.

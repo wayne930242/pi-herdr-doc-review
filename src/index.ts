@@ -44,6 +44,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { MARKDOWN_FILE, renderMarkdownPage } from "./markdown.ts";
 
 export const MINI_SDD_FILE = /(^|\/)docs\/specs\/[^/]+\/(decision|spec|design|verification)\.md$/;
 export const MINI_SDD_PHASES = ["decision.md", "spec.md", "design.md", "verification.md"];
@@ -227,7 +228,13 @@ export interface PublishedDocument {
 interface DocEntry extends PublishedDocument {
   /** The content last published, so a revision bumps only when the file really changed. */
   seen: string;
+  /** The pane showing it: a Markdown page is listed as text but shown in the browser. */
+  screen: Screen;
 }
+
+type Screen = "editor" | "browser";
+/** How show_doc opens a Markdown document: rendered as a page, or in the editor for review edits. */
+export type View = "page" | "edit";
 
 export interface FormResult {
   version: typeof CONTRACT_VERSION;
@@ -504,9 +511,12 @@ export function createPageServer(onAnswer: (query: string) => void, allowed: (pa
     } catch {
       return finish(response, 404);
     }
-    const type = CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream";
+    // A Markdown file is served as the page it renders to.
+    const markdown = MARKDOWN_FILE.test(path);
+    const type = markdown ? CONTENT_TYPES[".html"] : (CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream");
     response.writeHead(200, { "content-type": type, "cache-control": "no-store" });
-    response.end(HTML_FILE.test(path) ? Buffer.concat([content, Buffer.from(`\n${pageScript(base)}`)]) : content);
+    const page = markdown ? Buffer.from(renderMarkdownPage(content.toString("utf8"), basename(path))) : HTML_FILE.test(path) ? content : undefined;
+    response.end(page ? Buffer.concat([page, Buffer.from(`\n${pageScript(base)}`)]) : content);
   });
   server.unref();
   return new Promise((done, fail) => {
@@ -543,6 +553,23 @@ function feedbackMessage(display: string, diff: string): string {
 export function formMessage(fields: Iterable<readonly [string, string]>): string {
   const lines = [...fields].map(([name, value]) => `- ${name}: ${value}`);
   return `User submitted a form in the HTML review pane:\n${lines.join("\n") || "(no fields)"}`;
+}
+
+/**
+ * The agent's view of feedback sent from a page's feedback panel: each commented passage quoted with
+ * its comment, then the overall note. The panel sends `pi-kind=feedback`, `page`, `quote`/`comment`
+ * pairs, and `overall`.
+ */
+export function pageFeedbackMessage(fields: URLSearchParams): string {
+  const quotes = fields.getAll("quote");
+  const comments = fields.getAll("comment");
+  const parts = quotes.map((quote, index) => {
+    const quoted = quote ? quote.split("\n").map((line) => `> ${line}`).join("\n") : "";
+    return [quoted, comments[index] || "(no comment)"].filter(Boolean).join("\n");
+  });
+  const overall = fields.get("overall");
+  if (overall) parts.push(`Overall: ${overall}`);
+  return `User feedback on the page "${fields.get("page") ?? ""}":\n\n${parts.join("\n\n") || "(empty)"}`;
 }
 
 const isFieldList = (value: unknown): value is [string, string][] =>
@@ -624,7 +651,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     if (ctx?.hasUI) ctx.ui.notify(`${notice} go to the agent with your next message.`, "info");
   };
 
-  const listed = (): Omit<DocEntry, "seen">[] => [...docs.values()].map(({ seen: _seen, ...document }) => document);
+  const listed = (): PublishedDocument[] => [...docs.values()].map(({ seen: _seen, screen: _screen, ...document }) => document);
 
   const publish = (): void => {
     const documents = listed();
@@ -638,10 +665,10 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
   };
 
   /** Marks the documents of the given pane kinds as no longer on screen, announcing it once. */
-  const dropScreen = (kinds: DocKind[]): void => {
+  const dropScreen = (screens: Screen[]): void => {
     let changed = false;
     for (const entry of docs.values()) {
-      if (!entry.onScreen || !kinds.includes(entry.kind)) continue;
+      if (!entry.onScreen || !screens.includes(entry.screen)) continue;
       entry.onScreen = false;
       changed = true;
     }
@@ -651,11 +678,11 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
   function checkPanes(): void {
     // A browser the user quit stops listening (terminal-browser's page server with it) now, not at the next show.
     if (browser?.started && !browserAlive()) closeBrowser();
-    dropScreen([...(viewerAlive() ? [] : ["text" as const]), ...(browserAlive() ? [] : ["html" as const])]);
+    dropScreen([...(viewerAlive() ? [] : ["editor" as const]), ...(browserAlive() ? [] : ["browser" as const])]);
   }
 
   /** Lists documents that were just opened: new ones get an id, known ones keep theirs. */
-  const register = (group: { absolute: string; content: string; display: string }[], kind: DocKind, reason: string): void => {
+  const register = (group: { absolute: string; content: string; display: string }[], kind: DocKind, screen: Screen, reason: string): void => {
     if (closed) return;
     for (const doc of group) {
       const known = docs.get(doc.absolute);
@@ -669,6 +696,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
         revision: known ? known.revision + (known.seen === doc.content ? 0 : 1) : 1,
         onScreen: true,
         seen: doc.content,
+        screen,
       });
     }
     for (const oldest of docs.keys()) {
@@ -725,7 +753,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     const current = viewer;
     viewer = undefined;
     shown.clear();
-    dropScreen(["text"]);
+    dropScreen(["editor"]);
     if (!current) return;
     current.stopWatch();
     // The editor quits only without unsaved edits, and removes its scratch directory as it leaves.
@@ -735,7 +763,10 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
 
   /** One submitted form as a query string; a form without fields never reaches the agent. */
   const answered = (query: string): void => {
-    if (query) deliver(formMessage(new URLSearchParams(query)), "Your form answers", true);
+    if (!query) return;
+    const fields = new URLSearchParams(query);
+    if (fields.get("pi-kind") === "feedback") deliver(pageFeedbackMessage(fields), "Your page feedback", true);
+    else deliver(formMessage(fields), "Your form answers", true);
   };
 
   const closeBrowser = (): void => {
@@ -743,7 +774,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     browser = undefined;
     pages.clear();
     servable.clear();
-    dropScreen(["html"]);
+    dropScreen(["browser"]);
     if (!current) return;
     current.stop();
     // The pane's shell removes the scratch directory once the browser exits.
@@ -990,7 +1021,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     return fresh;
   };
 
-  const show = async (cwd: string, paths: string[], reason: string): Promise<ShowResult> => {
+  const show = async (cwd: string, paths: string[], reason: string, view: View = "edit"): Promise<ShowResult> => {
     const docs = paths.map((path) => {
       if (/[\n\r]/.test(path)) throw new Error(`cannot open a path containing a line break: ${JSON.stringify(path)}`);
       const absolute = deps.realpath(isAbsolute(path) ? path : resolve(cwd, path));
@@ -999,9 +1030,13 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
       const rel = relative(deps.realpath(cwd), absolute);
       return { absolute, content, display: rel.startsWith("..") ? absolute : rel };
     });
-    const inBrowser = (doc: { absolute: string }) => HTML_FILE.test(doc.absolute) || IMAGE_FILE.test(doc.absolute);
+    const isMarkdownPage = (doc: { absolute: string }) => view === "page" && MARKDOWN_FILE.test(doc.absolute);
+    const inBrowser = (doc: { absolute: string }) => HTML_FILE.test(doc.absolute) || IMAGE_FILE.test(doc.absolute) || isMarkdownPage(doc);
     const texts = docs.filter((doc) => !inBrowser(doc));
     const htmls = docs.filter(inBrowser);
+    if (view === "page" && texts.length > 0) {
+      throw new Error(`view "page" renders Markdown, HTML, and images; open ${texts.map((doc) => doc.display).join(", ")} with view "edit"`);
+    }
     // A NUL byte marks a binary file, which the editor would show as bytes; nothing opens when one is asked for.
     const binary = texts.filter((doc) => doc.content.includes("\0"));
     if (binary.length > 0) {
@@ -1009,16 +1044,23 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     }
     const names = docs.map((doc) => doc.display).join(", ");
     if (!deps.paneId) return { opened: [], text: `Not running inside Herdr, so no review pane opened. Tell the user to read: ${names}` };
+    const markdownPages = htmls.filter(isMarkdownPage);
+    // Chawan reads pages from disk, so nothing renders Markdown for it.
+    const program = browser && browserAlive() ? browser.program : markdownPages.length > 0 ? chooseBrowser() : undefined;
+    if (program === CHAWAN && markdownPages.length > 0) {
+      throw new Error(`Chawan cannot render Markdown pages; set ${BROWSER_ENV}=${EXTERNAL} or ${TERMINAL_BROWSER}, or open ${markdownPages.map((doc) => doc.display).join(", ")} with view "edit"`);
+    }
     const fresh: unknown[] = [];
     if (texts.length > 0) {
       fresh.push(...(await showText(cwd, texts)));
-      register(texts, "text", reason);
+      register(texts, "text", "editor", reason);
     }
     if (htmls.length > 0) {
       fresh.push(...(await showHtml(cwd, htmls)));
-      // Images stay off the event bus: its contract lists HTML and text documents only.
+      // Images stay off the event bus: its contract lists HTML and text documents only, so a Markdown page is text there.
       const pages = htmls.filter((doc) => HTML_FILE.test(doc.absolute));
-      if (pages.length > 0) register(pages, "html", reason);
+      if (pages.length > 0) register(pages, "html", "browser", reason);
+      if (markdownPages.length > 0) register(markdownPages, "text", "browser", reason);
     }
     if (fresh.length > 0) herdr("notification", "show", "Document ready for review", "--body", `${reason}: ${names}`, "--sound", "request");
     const list = (group: typeof docs) => group.map((doc) => doc.display).join(", ");
@@ -1157,24 +1199,30 @@ export default function docReview(pi: ExtensionAPI, deps: DocReviewDeps = defaul
       name: "show_doc",
       label: "Show document",
       description:
-        "Open documents the user should review in a pane beside this session (Herdr only; elsewhere it returns the paths to name to the user). " +
-        "Text documents open in one editable nvim or vim pane, one row per document, and the user's saved edits come back to you as a diff. " +
-        "HTML files (.html, .htm) and images (png, jpg, gif, webp, bmp, svg) open rendered in one browser pane, one tab per page of the user's default browser (or a Chawan or terminal-browser pane when the user chose one). Other binary files are refused. " +
-        "Keep scripts, styles, and images inline or in the page's directory: the page server loads nothing from a CDN or other site, nor from above the page's directory. " +
-        "Every page shown in the default browser or terminal-browser gets a built-in kit, so write bare semantic HTML with no <style> or <script>: " +
-        "base styles for headings, tables, code, details, and dark mode; <pi-callout tone=\"note|ok|warn|risk\" title>; <pi-grid> of <pi-card title tone>; <pi-badge tone>; " +
-        "<pi-options> of <pi-option title recommended pros=\"a; b\" cons=\"c; d\">body</pi-option> to compare alternatives; " +
-        "and <pi-form title submit=\"Send\"> holding <pi-question name label hint required type=\"single|multi|text\" other=\"Other\"> with <pi-choice value note recommended>Label</pi-choice> children, whose answers reach you as a message when the user sends the form. " +
-        "Put decisions that belong to the document (several questions, or a choice after a comparison) in a <pi-form> at its end; ask a single short question with your question tool. " +
-        "Use it whenever the user must understand or confirm written material: a spec, design, plan, report, or comparison; write material meant for understanding as HTML. " +
+        "Open documents the user should review beside this session (Herdr only; elsewhere it returns the paths to name to the user). " +
+        "Text documents open in one editable nvim or vim pane, and the user's saved edits come back to you as a diff: use it for specs and drafts the user should edit. " +
+        "For material the user should read or decide on (a report, plan, design, or comparison), write Markdown and open it with view \"page\": it renders in the user's default browser, one tab per page. HTML files and images (png, jpg, gif, webp, bmp, svg) always open there. " +
+        "Pages get a built-in style, so write no CSS or scripts. In a Markdown page: GitHub alerts (> [!NOTE], [!TIP], [!IMPORTANT], [!WARNING], [!CAUTION], with an optional title after the marker) become callouts; " +
+        "a ```mermaid block becomes a diagram (flowchart, state, sequence, class, ER, xychart bar or line); a ```diff block is coloured; " +
+        "a ```cards block holds a YAML list of {title, tone: note|ok|warn|risk, body}; ```options holds a YAML list of {title, recommended: true or a label, body, pros: [..], cons: [..]} shown side by side; " +
+        "```form holds {title, submit, questions: [{name, label, hint, required, type: single|multi|text, other: label, choices: [label or {value, label, note, recommended}]}]}, and the user's answers reach you as a message when they send it. body fields are Markdown. " +
+        "Images and links resolve against the page's directory; nothing loads from above it or from another site. " +
+        "Every page has a feedback panel: the user comments on selected passages and sends them to you as a message. " +
+        "Put decisions that belong to the page (several questions, or a choice after a comparison) in a ```form at its end; ask a single short question with your question tool. " +
+        "In HTML pages the same elements are tags: <pi-callout tone title>, <pi-grid> of <pi-card title tone>, <pi-badge tone>, <pi-options> of <pi-option title recommended pros=\"a; b\" cons=\"c; d\">, <pi-form title submit> of <pi-question name label hint required type other> with <pi-choice value note recommended>. " +
         "It returns at once without waiting for the user. Documents stay open and reload when you edit them.",
       parameters: Type.Object({
         paths: Type.Array(Type.String({ description: "File path, absolute or relative to the working directory" }), { minItems: 1 }),
         reason: Type.String({ description: "One short line telling the user what to review, e.g. 'Spec ready for approval'" }),
+        view: Type.Optional(
+          Type.Union([Type.Literal("page"), Type.Literal("edit")], {
+            description: "How Markdown opens: \"page\" renders it in the browser for reading, \"edit\" (default) opens it in the editor for review edits",
+          }),
+        ),
       }),
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
         review.setContext(ctx);
-        const result = await review.show(ctx.cwd, params.paths, params.reason);
+        const result = await review.show(ctx.cwd, params.paths, params.reason, params.view);
         return { content: [{ type: "text", text: result.text }], details: { opened: result.opened } };
       },
     }),

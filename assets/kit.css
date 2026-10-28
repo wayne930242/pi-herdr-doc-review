@@ -100,4 +100,34 @@
   pi-form button { font: inherit; font-weight: 600; color: #fff; background: var(--pi-accent); border: 0; border-radius: var(--pi-radius); padding: 0.55rem 1.4rem; cursor: pointer; }
   pi-form button:disabled { opacity: 0.6; cursor: default; }
   .pi-status { margin-left: 0.75rem; color: var(--pi-muted); }
+
+  /* Rendered Markdown: mermaid diagrams and diff blocks. */
+  .pi-diagram { margin: 0 0 1rem; padding: 1rem; overflow-x: auto; text-align: center; border: 1px solid var(--pi-border); border-radius: var(--pi-radius); }
+  .pi-diagram svg { max-width: 100%; height: auto; }
+  .pi-diff code { display: block; min-width: max-content; }
+  .pi-diff span { display: block; padding: 0 0.5rem; margin: 0 -0.5rem; }
+  .pi-diff .pi-add { color: var(--pi-ok); background: color-mix(in srgb, var(--pi-ok) 12%, transparent); }
+  .pi-diff .pi-del { color: var(--pi-risk); background: color-mix(in srgb, var(--pi-risk) 12%, transparent); }
+  .pi-diff .pi-hunk { color: var(--pi-accent); }
+
+  /* Images enlarge on click. */
+  img.pi-zoomable { cursor: zoom-in; }
+  .pi-lightbox { position: fixed; inset: 0; z-index: 2147483646; display: flex; align-items: center; justify-content: center; padding: 2rem; background: color-mix(in srgb, #000 80%, transparent); cursor: zoom-out; }
+  .pi-lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: var(--pi-radius); background: var(--pi-bg); }
+
+  /* The feedback panel every page carries. */
+  .pi-fb-toggle, .pi-fb-quote-button { position: fixed; z-index: 2147483645; font: 600 14px/1 system-ui, sans-serif; color: #fff; background: var(--pi-accent); border: 0; border-radius: 999px; padding: 0.7rem 1.1rem; cursor: pointer; box-shadow: 0 2px 8px rgb(0 0 0 / 25%); }
+  .pi-fb-toggle { right: 1.25rem; bottom: 1.25rem; }
+  .pi-fb-toggle[data-count]::after { content: attr(data-count); margin-left: 0.5em; padding: 0.1em 0.5em; border-radius: 999px; background: var(--pi-bg); color: var(--pi-accent); }
+  .pi-fb-quote-button { padding: 0.45rem 0.8rem; font-size: 13px; }
+  .pi-fb-panel { position: fixed; z-index: 2147483645; right: 1.25rem; bottom: 4.5rem; width: min(380px, calc(100vw - 2.5rem)); max-height: calc(100vh - 6rem); overflow-y: auto; box-sizing: border-box; padding: 1rem; color: var(--pi-fg); background: var(--pi-bg); border: 1px solid var(--pi-border); border-radius: var(--pi-radius); box-shadow: 0 8px 24px rgb(0 0 0 / 30%); font: 14px/1.6 system-ui, sans-serif; }
+  .pi-fb-panel[hidden] { display: none; }
+  .pi-fb-panel h4 { margin: 0 0 0.5rem; font-size: 15px; }
+  .pi-fb-panel .pi-fb-hint { margin: 0 0 0.75rem; color: var(--pi-muted); font-size: 13px; }
+  .pi-fb-item { margin: 0 0 0.75rem; padding: 0.6rem; background: var(--pi-surface); border-radius: var(--pi-radius); }
+  .pi-fb-item blockquote { margin: 0 0 0.4rem; padding: 0; background: none; font-size: 13px; max-height: 5.5em; overflow: hidden; }
+  .pi-fb-item button { float: right; font: inherit; font-size: 12px; color: var(--pi-muted); background: none; border: 0; cursor: pointer; }
+  .pi-fb-panel textarea { width: 100%; box-sizing: border-box; min-height: 3.5rem; font: inherit; color: inherit; background: var(--pi-bg); border: 1px solid var(--pi-border); border-radius: 6px; padding: 0.4rem 0.6rem; }
+  .pi-fb-send { margin-top: 0.5rem; font: 600 14px system-ui, sans-serif; color: #fff; background: var(--pi-accent); border: 0; border-radius: 6px; padding: 0.5rem 1.1rem; cursor: pointer; }
+  .pi-fb-status { margin-left: 0.6rem; color: var(--pi-muted); font-size: 13px; }
 }
