@@ -108,6 +108,9 @@ class Question extends Built {
   }
 }
 
+/** Resolves a second after it is called: a send button stays disabled that long so the user sees the send happen. */
+const held = () => new Promise((resolve) => setTimeout(resolve, 1000));
+
 /** <pi-form title submit="Send">: gathers its <pi-question> answers and sends them to the agent. */
 class Form extends Built {
   build() {
@@ -126,6 +129,7 @@ class Form extends Built {
       if (title) fields.unshift(["form", title]);
       button.disabled = true;
       status.textContent = "Sending…";
+      const shown = held();
       try {
         if (!window.piDocReview) throw new Error("this page was not opened by show_doc");
         await window.piDocReview.send(fields);
@@ -133,7 +137,8 @@ class Form extends Built {
       } catch (error) {
         status.textContent = `Not sent: ${error.message}`;
       } finally {
-        // The form stays usable: a changed answer can be sent again.
+        // The form stays usable: a changed answer can be sent again, after the pause that shows it went.
+        await shown;
         button.disabled = false;
       }
     });
@@ -277,6 +282,7 @@ function feedbackPanel() {
     if (state.overall.trim()) fields.push(["overall", state.overall.trim()]);
     send.disabled = true;
     status.textContent = words.sending;
+    const shown = held();
     try {
       await window.piDocReview.send(fields);
       state.items = [];
@@ -288,6 +294,7 @@ function feedbackPanel() {
     } catch (error) {
       status.textContent = words.notSent + error.message;
     } finally {
+      await shown;
       send.disabled = false;
     }
   });

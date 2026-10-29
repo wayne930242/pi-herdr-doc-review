@@ -139,6 +139,8 @@ export function Form({ title, submit = "Send to agent", onSent, children }: { ti
     if (title) fields.unshift(["form", title]);
     setBusy(true);
     setStatus("Sending…");
+    // The button stays disabled at least a second so the user sees the send happen.
+    const shown = new Promise((resolve) => setTimeout(resolve, 1000));
     try {
       await send(fields);
       setStatus("Sent to the agent. Change an answer and send again to update it.");
@@ -147,6 +149,7 @@ export function Form({ title, submit = "Send to agent", onSent, children }: { ti
       setStatus(`Not sent: ${(error as Error).message}`);
     } finally {
       // The form stays usable: a changed answer can be sent again.
+      await shown;
       setBusy(false);
     }
   };
