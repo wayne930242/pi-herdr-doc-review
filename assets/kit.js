@@ -12,6 +12,13 @@ const okBadge = (text) => {
   return badge;
 };
 
+// The kit's own words follow the page's language, else the browser's. Defined before the elements,
+// which build as soon as they are defined.
+const zh = /^zh/i.test(document.documentElement.lang || navigator.language);
+const words = zh
+  ? { feedback: "回饋", comment: "留言", heading: "給 agent 的回饋", hint: "選取頁面上的文字可以針對那段留言。", overall: "整體意見", send: "送給 agent", sending: "傳送中…", sent: "已送給 agent。", empty: "還沒有內容。", remove: "移除", notSent: "沒送出：", other: "其他（自行填寫）", note: "回饋（留白代表沒意見）", pick: "選這個", unanswered: "還沒回答：", resend: "已送給 agent。改了可以再送一次。" }
+  : { feedback: "Feedback", comment: "Comment", heading: "Feedback for the agent", hint: "Select text on the page to comment on it.", overall: "Overall", send: "Send to agent", sending: "Sending…", sent: "Sent to the agent.", empty: "Nothing to send yet.", remove: "Remove", notSent: "Not sent: ", other: "Other (type your own)", note: "Feedback (leave blank for none)", pick: "Pick this", unanswered: "Unanswered: ", resend: "Sent to the agent. Change anything and send again to update it." };
+
 /** An element that builds its content once, when it is first attached. */
 class Built extends HTMLElement {
   connectedCallback() {
@@ -60,7 +67,8 @@ let questions = 0;
 
 /**
  * <pi-question name label type="single|multi|text" hint required other="Other">, with <pi-choice
- * value note recommended>Label</pi-choice> children. Without choices it is a text question.
+ * value note recommended>Label</pi-choice> children. Without choices it is a text question. A choice
+ * question ends with a box for the user's own answer, labelled by `other`; `other="false"` drops it.
  */
 class Question extends Built {
   build() {
@@ -85,8 +93,8 @@ class Question extends Built {
         parts.push(make("label", { className: "pi-choice" }, make("input", { type: input, name: id, value }), text));
       }
       const other = this.getAttribute("other");
-      if (other !== null) {
-        const box = make("input", { type: "text", placeholder: other || "Other", className: "pi-other" });
+      if (other !== "false") {
+        const box = make("input", { type: "text", placeholder: other || words.other, className: "pi-other" });
         parts.push(make("label", { className: "pi-choice" }, make("input", { type: input, name: id, value: "", className: "pi-other-pick" }), box));
         box.addEventListener("input", () => {
           this.querySelector(".pi-other-pick").checked = box.value !== "";
@@ -116,26 +124,26 @@ class Form extends Built {
   build() {
     this.titled();
     const status = make("span", { className: "pi-status" });
-    const button = make("button", { type: "button", textContent: this.getAttribute("submit") ?? "Send to agent" });
+    const button = make("button", { type: "button", textContent: this.getAttribute("submit") ?? words.send });
     button.addEventListener("click", async () => {
       const asked = [...this.querySelectorAll("pi-question")];
       const missing = asked.filter((question) => question.hasAttribute("required") && !question.answer);
       if (missing.length > 0) {
-        status.textContent = `Unanswered: ${missing.map((question) => question.getAttribute("label") ?? question.name).join(", ")}`;
+        status.textContent = `${words.unanswered}${missing.map((question) => question.getAttribute("label") ?? question.name).join(", ")}`;
         return;
       }
       const fields = asked.map((question) => [question.name, question.answer || "(no answer)"]);
       const title = this.querySelector(":scope > .pi-title")?.textContent;
       if (title) fields.unshift(["form", title]);
       button.disabled = true;
-      status.textContent = "Sending…";
+      status.textContent = words.sending;
       const shown = held();
       try {
         if (!window.piDocReview) throw new Error("this page was not opened by show_doc");
         await window.piDocReview.send(fields);
-        status.textContent = "Sent to the agent. Change an answer and send again to update it.";
+        status.textContent = words.resend;
       } catch (error) {
-        status.textContent = `Not sent: ${error.message}`;
+        status.textContent = words.notSent + error.message;
       } finally {
         // The form stays usable: a changed answer can be sent again, after the pause that shows it went.
         await shown;
@@ -146,8 +154,102 @@ class Form extends Built {
   }
 }
 
+/** A prototype's URL with `pi-bare`, so the page server shows it as written, without the kit. */
+const bare = (page) => {
+  const url = new URL(page, location.href);
+  url.searchParams.set("pi-bare", "");
+  return url.href;
+};
+
+/** An item's name with its label, as the agent reads it: `B (dark header)`. */
+const itemName = (name, label) => (label ? `${name} (${label})` : name);
+
+/**
+ * <pi-review title submit pick columns> of <pi-item name label image page height>: things the user
+ * gives feedback on one by one (an image, an HTML prototype in a frame, or the item's own content),
+ * each with a comment box that means "no feedback" when left blank. With `pick` (its value labels the
+ * choice), the user also picks one favourite, for an A/B test. Items are named A, B, C… unless they
+ * carry a name. Drafts survive the reload an agent's edit causes, kept per page in sessionStorage.
+ */
+let reviews = 0;
+class Review extends Built {
+  build() {
+    const key = `pi-review:${location.pathname}:${++reviews}`;
+    const saved = JSON.parse(sessionStorage.getItem(key) ?? "null") ?? { picked: "", comments: {} };
+    const save = () => sessionStorage.setItem(key, JSON.stringify(saved));
+    const title = this.getAttribute("title") ?? "";
+    this.titled();
+    const columns = Number(this.getAttribute("columns"));
+    const grid = make("div", { className: "pi-review-items" });
+    // A column count holds on wide screens; a narrow one stacks the items.
+    if (columns > 0) {
+      grid.dataset.columns = "";
+      grid.style.setProperty("--pi-columns", String(columns));
+    }
+    const pick = this.getAttribute("pick");
+    const group = `${key}:pick`;
+    const items = [...this.querySelectorAll(":scope > pi-item")].map((item, index) => {
+      const name = item.getAttribute("name") || String.fromCharCode(65 + index);
+      const label = item.getAttribute("label") ?? "";
+      const head = make("div", { className: "pi-item-head" }, make("span", { className: "pi-title", textContent: itemName(name, label) }));
+      if (pick !== null) {
+        const radio = make("input", { type: "radio", name: group, value: name, checked: saved.picked === name });
+        radio.addEventListener("change", () => {
+          saved.picked = name;
+          save();
+        });
+        head.append(make("label", { className: "pi-pick" }, radio, pick || words.pick));
+      }
+      const body = make("div", { className: "pi-item-body" }, ...item.childNodes);
+      const image = item.getAttribute("image");
+      if (image) body.prepend(make("img", { src: image, alt: itemName(name, label) }));
+      const page = item.getAttribute("page");
+      if (page) {
+        const frame = make("div", { className: "pi-frame" }, make("iframe", { src: bare(page), title: itemName(name, label) }));
+        frame.style.height = `${Number(item.getAttribute("height")) || 480}px`;
+        body.prepend(frame);
+      }
+      const note = make("textarea", { placeholder: words.note, value: saved.comments[name] ?? "" });
+      note.addEventListener("input", () => {
+        saved.comments[name] = note.value;
+        save();
+      });
+      item.replaceChildren(head, body, note);
+      grid.append(item);
+      return { name: itemName(name, label), value: name, note };
+    });
+    const status = make("span", { className: "pi-status" });
+    const button = make("button", { type: "button", textContent: this.getAttribute("submit") ?? words.send });
+    button.addEventListener("click", async () => {
+      const picked = items.find((item) => item.value === saved.picked);
+      const commented = items.filter((item) => item.note.value.trim());
+      if (!picked && commented.length === 0) return void (status.textContent = words.empty);
+      const fields = [["pi-kind", "review"], ["title", title || document.title]];
+      if (picked) fields.push(["picked", picked.name]);
+      for (const item of commented) fields.push(["item", item.name], ["comment", item.note.value.trim()]);
+      const silent = items.filter((item) => !item.note.value.trim()).map((item) => item.name);
+      if (silent.length > 0) fields.push(["silent", silent.join(", ")]);
+      button.disabled = true;
+      status.textContent = words.sending;
+      const shown = held();
+      try {
+        if (!window.piDocReview) throw new Error("this page was not opened by show_doc");
+        await window.piDocReview.send(fields);
+        status.textContent = words.resend;
+      } catch (error) {
+        status.textContent = words.notSent + error.message;
+      } finally {
+        await shown;
+        button.disabled = false;
+      }
+    });
+    this.append(grid, make("div", {}, button, status));
+  }
+}
+
 for (const [tag, element] of [
   ["pi-callout", Callout],
+  ["pi-review", Review],
   ["pi-card", Card],
   ["pi-option", Option],
   ["pi-question", Question],
@@ -155,11 +257,6 @@ for (const [tag, element] of [
 ]) {
   if (!customElements.get(tag)) customElements.define(tag, element);
 }
-
-const zh = /^zh/i.test(document.documentElement.lang || navigator.language);
-const words = zh
-  ? { feedback: "回饋", comment: "留言", heading: "給 agent 的回饋", hint: "選取頁面上的文字可以針對那段留言。", overall: "整體意見", send: "送給 agent", sending: "傳送中…", sent: "已送給 agent。", empty: "還沒有內容。", remove: "移除", notSent: "沒送出：" }
-  : { feedback: "Feedback", comment: "Comment", heading: "Feedback for the agent", hint: "Select text on the page to comment on it.", overall: "Overall", send: "Send to agent", sending: "Sending…", sent: "Sent to the agent.", empty: "Nothing to send yet.", remove: "Remove", notSent: "Not sent: " };
 
 /** Images enlarge on click, unless they are links. */
 function zoomImages() {
@@ -302,4 +399,5 @@ function feedbackPanel() {
 }
 
 zoomImages();
-if (window.piDocReview) feedbackPanel();
+// A page shown in a review item's frame leaves the feedback panel to the page around it.
+if (window.piDocReview && window === window.top) feedbackPanel();

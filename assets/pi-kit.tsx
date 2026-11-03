@@ -2,7 +2,7 @@
 // agent anything the page collects. The components render the kit's final markup themselves and mark
 // it `data-static`, so kit.js leaves the DOM React owns alone.
 
-import { Children, createContext, isValidElement, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { Children, createContext, isValidElement, useContext, useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 export type Tone = "note" | "ok" | "warn" | "risk";
 
@@ -17,6 +17,13 @@ export function send(fields: [string, string][] | Record<string, string>): Promi
   if (!window.piDocReview) return Promise.reject(new Error("this page was not opened by show_doc"));
   return window.piDocReview.send(Array.isArray(fields) ? fields : Object.entries(fields));
 }
+
+/** The kit's own words follow the page's language, else the browser's, as kit.js does. */
+const inChinese = (): boolean => /^zh/i.test(document.documentElement.lang || navigator.language);
+const kitWords = () =>
+  inChinese()
+    ? { send: "送給 agent", sending: "傳送中…", resend: "已送給 agent。改了可以再送一次。", notSent: "沒送出：", unanswered: "還沒回答：", empty: "還沒有內容。", other: "其他（自行填寫）", note: "回饋（留白代表沒意見）", pick: "選這個" }
+    : { send: "Send to agent", sending: "Sending…", resend: "Sent to the agent. Change anything and send again to update it.", notSent: "Not sent: ", unanswered: "Unanswered: ", empty: "Nothing to send yet.", other: "Other (type your own)", note: "Feedback (leave blank for none)", pick: "Pick this" };
 
 const render = async (kind: "markdown" | "mermaid", source: string): Promise<string> => {
   if (!window.piDocReview) throw new Error("this page was not opened by show_doc");
@@ -128,25 +135,26 @@ interface Asked {
 const FormContext = createContext<Map<string, Asked> | undefined>(undefined);
 
 /** Questions whose answers go to the agent as one message when the user sends the form. */
-export function Form({ title, submit = "Send to agent", onSent, children }: { title?: string; submit?: string; onSent?: () => void; children?: ReactNode }) {
+export function Form({ title, submit, onSent, children }: { title?: string; submit?: string; onSent?: () => void; children?: ReactNode }) {
   const asked = useRef(new Map<string, Asked>()).current;
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const sendForm = async () => {
     const missing = [...asked.values()].filter((question) => question.required && !question.answer());
-    if (missing.length > 0) return setStatus(`Unanswered: ${missing.map((question) => question.label).join(", ")}`);
+    const words = kitWords();
+    if (missing.length > 0) return setStatus(`${words.unanswered}${missing.map((question) => question.label).join(", ")}`);
     const fields: [string, string][] = [...asked].map(([name, question]) => [name, question.answer() || "(no answer)"]);
     if (title) fields.unshift(["form", title]);
     setBusy(true);
-    setStatus("Sending…");
+    setStatus(words.sending);
     // The button stays disabled at least a second so the user sees the send happen.
     const shown = new Promise((resolve) => setTimeout(resolve, 1000));
     try {
       await send(fields);
-      setStatus("Sent to the agent. Change an answer and send again to update it.");
+      setStatus(words.resend);
       onSent?.();
     } catch (error) {
-      setStatus(`Not sent: ${(error as Error).message}`);
+      setStatus(`${words.notSent}${(error as Error).message}`);
     } finally {
       // The form stays usable: a changed answer can be sent again.
       await shown;
@@ -160,7 +168,7 @@ export function Form({ title, submit = "Send to agent", onSent, children }: { ti
         {children}
         <div>
           <button type="button" disabled={busy} onClick={sendForm}>
-            {submit}
+            {submit ?? kitWords().send}
           </button>
           <span className="pi-status">{status}</span>
         </div>
@@ -176,7 +184,8 @@ export function Choice(_props: { value?: string; note?: string; recommended?: bo
 
 type ChoiceProps = Parameters<typeof Choice>[0];
 
-export function Question({ name, label, hint, required = false, type, other, children }: { name?: string; label: string; hint?: string; required?: boolean; type?: "single" | "multi" | "text"; other?: string; children?: ReactNode }) {
+/** A choice question ends with a box for the user's own answer, labelled by `other`; `other={false}` drops it. */
+export function Question({ name, label, hint, required = false, type, other, children }: { name?: string; label: string; hint?: string; required?: boolean; type?: "single" | "multi" | "text"; other?: string | false; children?: ReactNode }) {
   const asked = useContext(FormContext);
   const id = useId();
   const choices = Children.toArray(children).filter((child) => isValidElement(child) && child.type === Choice).map((child) => (child as { props: ChoiceProps }).props);
@@ -214,12 +223,12 @@ export function Question({ name, label, hint, required = false, type, other, chi
               </label>
             );
           })}
-          {other !== undefined && (
+          {other !== false && (
             <label className="pi-choice">
               <input type={input} name={id} checked={picked.includes("\0other")} onChange={(event) => pick("\0other", event.target.checked)} />
               <input
                 type="text"
-                placeholder={other || "Other"}
+                placeholder={other || kitWords().other}
                 value={otherText}
                 onChange={(event) => {
                   setOtherText(event.target.value);
@@ -231,5 +240,109 @@ export function Question({ name, label, hint, required = false, type, other, chi
         </>
       )}
     </pi-question>
+  );
+}
+
+/** One thing under review in a `<Review>`: an image, an HTML prototype in a frame, or its children; it renders nothing itself. */
+export function Item(_props: { name?: string; label?: string; image?: string; page?: string; height?: number; children?: ReactNode }) {
+  return null;
+}
+
+type ItemProps = Parameters<typeof Item>[0];
+
+/** A prototype's URL with `pi-bare`, so the page server shows it as written, without the kit. */
+const bare = (page: string): string => {
+  const url = new URL(page, location.href);
+  url.searchParams.set("pi-bare", "");
+  return url.href;
+};
+
+const itemName = (name: string, label?: string): string => (label ? `${name} (${label})` : name);
+
+/**
+ * Items the user comments on one by one, a blank comment meaning no feedback; with `pick` (true, or
+ * the choice's label) the user also picks a favourite, for an A/B test. Items are named A, B, C…
+ * unless they carry a name. Drafts survive the reload an agent's edit causes, kept in sessionStorage.
+ */
+export function Review({ title, submit, pick, columns, children }: { title?: string; submit?: string; pick?: boolean | string; columns?: number; children?: ReactNode }) {
+  const words = kitWords();
+  const items = Children.toArray(children)
+    .filter((child) => isValidElement(child) && child.type === Item)
+    .map((child, index) => {
+      const props = (child as { props: ItemProps }).props;
+      return { ...props, value: props.name || String.fromCharCode(65 + index) };
+    });
+  const key = `pi-review:${location.pathname}:${title ?? ""}`;
+  const [saved, setSaved] = useState<{ picked: string; comments: Record<string, string> }>(() => JSON.parse(sessionStorage.getItem(key) ?? "null") ?? { picked: "", comments: {} });
+  useEffect(() => sessionStorage.setItem(key, JSON.stringify(saved)), [key, saved]);
+  const [status, setStatus] = useState("");
+  const [busy, setBusy] = useState(false);
+  const group = useId();
+  const sendReview = async () => {
+    const comment = (value: string) => (saved.comments[value] ?? "").trim();
+    const picked = items.find((item) => item.value === saved.picked);
+    const commented = items.filter((item) => comment(item.value));
+    if (!picked && commented.length === 0) return setStatus(words.empty);
+    const fields: [string, string][] = [["pi-kind", "review"], ["title", title || document.title]];
+    if (picked) fields.push(["picked", itemName(picked.value, picked.label)]);
+    for (const item of commented) fields.push(["item", itemName(item.value, item.label)], ["comment", comment(item.value)]);
+    const silent = items.filter((item) => !comment(item.value)).map((item) => itemName(item.value, item.label));
+    if (silent.length > 0) fields.push(["silent", silent.join(", ")]);
+    setBusy(true);
+    setStatus(words.sending);
+    // The button stays disabled at least a second so the user sees the send happen.
+    const shown = new Promise((resolve) => setTimeout(resolve, 1000));
+    try {
+      await send(fields);
+      setStatus(words.resend);
+    } catch (error) {
+      setStatus(`${words.notSent}${(error as Error).message}`);
+    } finally {
+      await shown;
+      setBusy(false);
+    }
+  };
+  return (
+    <pi-review data-static="">
+      <Title>{title}</Title>
+      <div className="pi-review-items" data-columns={columns ? "" : undefined} style={columns ? ({ "--pi-columns": String(columns) } as CSSProperties) : undefined}>
+        {items.map((item) => (
+          <pi-item key={item.value}>
+            <div className="pi-item-head">
+              <span className="pi-title">{itemName(item.value, item.label)}</span>
+              {pick ? (
+                <label className="pi-pick">
+                  <input type="radio" name={group} checked={saved.picked === item.value} onChange={() => setSaved((current) => ({ ...current, picked: item.value }))} />
+                  {pick === true ? words.pick : pick}
+                </label>
+              ) : null}
+            </div>
+            <div className="pi-item-body">
+              {item.image && <img src={item.image} alt={itemName(item.value, item.label)} />}
+              {item.page && (
+                <div className="pi-frame" style={{ height: `${item.height || 480}px` }}>
+                  <iframe src={bare(item.page)} title={itemName(item.value, item.label)} />
+                </div>
+              )}
+              {item.children}
+            </div>
+            <textarea
+              placeholder={words.note}
+              value={saved.comments[item.value] ?? ""}
+              onChange={(event) => {
+                const text = event.target.value;
+                setSaved((current) => ({ ...current, comments: { ...current.comments, [item.value]: text } }));
+              }}
+            />
+          </pi-item>
+        ))}
+      </div>
+      <div>
+        <button type="button" disabled={busy} onClick={sendReview}>
+          {submit ?? words.send}
+        </button>
+        <span className="pi-status">{status}</span>
+      </div>
+    </pi-review>
   );
 }

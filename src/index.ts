@@ -547,7 +547,9 @@ export function createPageServer(onAnswer: (query: string) => void, allowed: (pa
     const markdown = MARKDOWN_FILE.test(path);
     const type = markdown ? CONTENT_TYPES[".html"] : (CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream");
     response.writeHead(200, { "content-type": type, "cache-control": "no-store" });
-    const page = markdown ? Buffer.from(renderMarkdownPage(content.toString("utf8"), basename(path))) : HTML_FILE.test(path) ? content : undefined;
+    // A review item frames an HTML prototype with `?pi-bare`: it shows as written, without the kit.
+    const kitted = HTML_FILE.test(path) && !url.searchParams.has("pi-bare");
+    const page = markdown ? Buffer.from(renderMarkdownPage(content.toString("utf8"), basename(path))) : kitted ? content : undefined;
     response.end(page ? Buffer.concat([page, Buffer.from(`\n${pageScript(base)}`)]) : content);
   });
   server.unref();
@@ -602,6 +604,24 @@ export function pageFeedbackMessage(fields: URLSearchParams): string {
   const overall = fields.get("overall");
   if (overall) parts.push(`Overall: ${overall}`);
   return `User feedback on the page "${fields.get("page") ?? ""}":\n\n${parts.join("\n\n") || "(empty)"}`;
+}
+
+/**
+ * The agent's view of a sent review: the picked item, each commented item with its comment, and the
+ * items left blank, which mean no feedback. The kit sends `pi-kind=review`, `title`, `picked`,
+ * `item`/`comment` pairs, and `silent`.
+ */
+export function reviewMessage(fields: URLSearchParams): string {
+  const comments = fields.getAll("comment");
+  const lines = fields.getAll("item").map((item, index) => `- ${item}: ${(comments[index] ?? "").replace(/\n/g, "\n  ")}`);
+  const picked = fields.get("picked");
+  const silent = fields.get("silent");
+  return [
+    `User reviewed "${fields.get("title") ?? ""}":`,
+    ...(picked ? [`Picked: ${picked}`] : []),
+    ...lines,
+    ...(silent ? [`No feedback on: ${silent}`] : []),
+  ].join("\n");
 }
 
 const isFieldList = (value: unknown): value is [string, string][] =>
@@ -797,7 +817,9 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
   const answered = (query: string): void => {
     if (!query) return;
     const fields = new URLSearchParams(query);
-    if (fields.get("pi-kind") === "feedback") deliver(pageFeedbackMessage(fields), "Your page feedback", true);
+    const kind = fields.get("pi-kind");
+    if (kind === "feedback") deliver(pageFeedbackMessage(fields), "Your page feedback", true);
+    else if (kind === "review") deliver(reviewMessage(fields), "Your review", true);
     else deliver(formMessage(fields), "Your form answers", true);
   };
 
@@ -1238,12 +1260,13 @@ export default function docReview(pi: ExtensionAPI, deps: DocReviewDeps = defaul
         "Pages get a built-in style, so write no CSS or scripts. In a Markdown page: GitHub alerts (> [!NOTE], [!TIP], [!IMPORTANT], [!WARNING], [!CAUTION], with an optional title after the marker) become callouts; " +
         "a ```mermaid block becomes a diagram (flowchart, state, sequence, class, ER, xychart bar or line); a ```diff block is coloured; " +
         "a ```cards block holds a YAML list of {title, tone: note|ok|warn|risk, body}; ```options holds a YAML list of {title, recommended: true or a label, body, pros: [..], cons: [..]} shown side by side; " +
-        "```form holds {title, submit, questions: [{name, label, hint, required, type: single|multi|text, other: label, choices: [label or {value, label, note, recommended}]}]}, and the user's answers reach you as a message when they send it. body fields are Markdown. " +
+        "```form holds {title, submit, questions: [{name, label, hint, required, type: single|multi|text, other: label or false, choices: [label or {value, label, note, recommended}]}]}, and the user's answers reach you as a message when they send it; a choice question always ends with a box for the user's own answer unless other is false. " +
+        "```review holds {title, submit, pick: true or a label, columns, items: [{name, label, image: path, page: path to an HTML prototype, height, body}]}: the user comments on each item (blank means no feedback) and, with pick, picks a favourite, for A/B tests of designs, screenshots, or prototypes; items are named A, B, C… unless named. body fields are Markdown. " +
         "Images and links resolve against the page's directory; nothing loads from above it or from another site. " +
         "Every page has a feedback panel: the user comments on selected passages and sends them to you as a message. " +
         "Put decisions that belong to the page (several questions, or a choice after a comparison) in a ```form at its end; ask a single short question with your question tool. " +
-        "When a page needs interaction (inputs that recompute, tabs, filters), write a .tsx or .jsx file whose default export is a React component and open it with view \"page\": React is built in, and the \"pi-kit\" module exports Callout, Grid, Card, Badge, Options, Option, Form, Question, Choice (same props as the YAML fields), Markdown and Mermaid (children are their source), and send(fields) to hand the agent any values as a message. Import sibling modules freely; import no CSS. " +
-        "In HTML pages the same elements are tags: <pi-callout tone title>, <pi-grid> of <pi-card title tone>, <pi-badge tone>, <pi-options> of <pi-option title recommended pros=\"a; b\" cons=\"c; d\">, <pi-form title submit> of <pi-question name label hint required type other> with <pi-choice value note recommended>. " +
+        "When a page needs interaction (inputs that recompute, tabs, filters), write a .tsx or .jsx file whose default export is a React component and open it with view \"page\": React is built in, and the \"pi-kit\" module exports Callout, Grid, Card, Badge, Options, Option, Form, Question, Choice, Review, Item (same props as the YAML fields; an Item's children are the component under review), Markdown and Mermaid (children are their source), and send(fields) to hand the agent any values as a message. Import sibling modules freely; import no CSS. " +
+        "In HTML pages the same elements are tags: <pi-callout tone title>, <pi-grid> of <pi-card title tone>, <pi-badge tone>, <pi-options> of <pi-option title recommended pros=\"a; b\" cons=\"c; d\">, <pi-form title submit> of <pi-question name label hint required type other> with <pi-choice value note recommended>, <pi-review title submit pick columns> of <pi-item name label image page height> (its content is the item when it has no image or page). " +
         "It returns at once without waiting for the user. Documents stay open and reload when you edit them.",
       parameters: Type.Object({
         paths: Type.Array(Type.String({ description: "File path, absolute or relative to the working directory" }), { minItems: 1 }),

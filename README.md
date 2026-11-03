@@ -31,7 +31,8 @@ On top of CommonMark, tables, and raw HTML:
 | a `diff` code block | added, removed, and hunk lines coloured |
 | a `cards` block: YAML list of `{title, tone, body}` | a `<pi-grid>` of `<pi-card>` |
 | an `options` block: YAML list of `{title, recommended, body, pros, cons}` | a `<pi-options>` comparison |
-| a `form` block: `{title, submit, questions: [{name, label, hint, required, type, other, choices}]}`, each choice a label or `{value, label, note, recommended}` | a `<pi-form>` |
+| a `form` block: `{title, submit, questions: [{name, label, hint, required, type, other, choices}]}`, each choice a label or `{value, label, note, recommended}` | a `<pi-form>`; a choice question ends with a box for the user's own answer, labelled by `other`, unless `other: false` |
+| a `review` block: `{title, submit, pick, columns, items: [{name, label, image, page, height, body}]}`, or a list of image paths | a `<pi-review>` (see [Reviews](#reviews)) |
 
 `body` fields are Markdown. A block that cannot be drawn shows its error and source in a red callout instead of failing the page. See [`examples/markdown-demo.md`](examples/markdown-demo.md).
 
@@ -45,14 +46,36 @@ The `pi-kit` module gives React pages the kit:
 | --- | --- |
 | `Callout`, `Grid`, `Card`, `Badge`, `Options`, `Option` | the kit elements, with the props the Markdown blocks take (`pros` and `cons` are arrays) |
 | `Form`, `Question`, `Choice` | a form whose answers go to the agent; `Choice` children of a `Question` are its answers |
+| `Review`, `Item` | a review; an `Item`'s children are the component under review |
 | `Markdown`, `Mermaid` | Markdown or a diagram from a string child, rendered by the page server |
 | `send(fields)` | sends any values (an object or `[name, value]` pairs) to the agent as a message |
 
 See [`examples/react-demo.tsx`](examples/react-demo.tsx).
 
+## Reviews
+
+A review asks for feedback on several things at once: screenshots, HTML prototypes, or components. Each item shows one of them with a comment box under it, and a blank box means no feedback on that item. With `pick` the user also picks a favourite, which makes it an A/B test; `pick: true` labels the choice "Pick this", and a string labels it with that text.
+
+| Item field | Shows |
+| --- | --- |
+| `image` | an image, by a path relative to the page |
+| `page` | an HTML prototype in a frame, `height` pixels tall (480 by default, and the user can drag it taller). The frame loads the page with `?pi-bare`, so it renders as written, without the kit |
+| `body` (Markdown), the tag's content, or an `Item`'s children | anything else: text, HTML, or a React component |
+
+Items are named A, B, C… unless they carry a `name`, and `label` adds a description after the name. `columns` fixes the number of columns on a wide screen, while a narrow screen always shows one. Sending reaches the agent as one message that names the pick, quotes each comment under its item, and lists the items left blank:
+
+```text
+User reviewed "Header":
+Picked: B (light)
+- A (dark): the menu text is too small
+No feedback on: B (light)
+```
+
+The user can change anything and send again. Drafts survive the reload an agent's edit causes. See [`examples/review-demo.md`](examples/review-demo.md) and [`examples/review-demo.tsx`](examples/review-demo.tsx).
+
 ## Feedback panel
 
-Every page served to the default browser or terminal-browser has a feedback button. Selecting text offers a comment on that passage; the panel collects these comments and an overall note, and sends them to the agent in one message that quotes each passage above its comment. Drafts are kept per page in the tab's session storage, so they survive the reload an agent's edit causes. Images enlarge on click.
+Every page served to the default browser or terminal-browser has a feedback button. Selecting text offers a comment on that passage; the panel collects these comments and an overall note, and sends them to the agent in one message that quotes each passage above its comment. Drafts are kept per page in the tab's session storage, so they survive the reload an agent's edit causes. Images enlarge on click. A page shown inside a review item's frame has no panel of its own. The kit's words follow the page's language, else the browser's.
 
 ## Page kit
 
@@ -65,7 +88,8 @@ Every HTML page served to the default browser or terminal-browser gets a built-i
 | `<pi-grid>` of `<pi-card title tone>` | a grid of summary cards |
 | `<pi-badge tone>` | an inline label |
 | `<pi-options>` of `<pi-option title recommended pros="a; b" cons="c; d">` | alternatives side by side |
-| `<pi-form title submit>` of `<pi-question name label hint required type="single\|multi\|text" other>` with `<pi-choice value note recommended>` | questions whose answers go to the agent when the user sends the form |
+| `<pi-form title submit>` of `<pi-question name label hint required type="single\|multi\|text" other>` with `<pi-choice value note recommended>` | questions whose answers go to the agent when the user sends the form; a choice question ends with a box for the user's own answer unless `other="false"` |
+| `<pi-review title submit pick columns>` of `<pi-item name label image page height>` | items the user comments on one by one, see [Reviews](#reviews) |
 
 A sent `<pi-form>` reaches the agent like any `cgi-bin:pi-answer` form: one message listing each question's `name` and answer, with the form's title first. Pages also get `window.piDocReview.send(fields)` for their own scripts. See [`examples/kit-gallery.html`](examples/kit-gallery.html) for every element beside its markup, and [`examples/kit-demo.html`](examples/kit-demo.html) for a whole page.
 

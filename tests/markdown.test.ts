@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createPageServer, pageFeedbackMessage } from "../src/index.ts";
+import { createPageServer, pageFeedbackMessage, reviewMessage } from "../src/index.ts";
 import { renderMarkdownPage } from "../src/markdown.ts";
 
 const page = (source: string) => renderMarkdownPage(source, "page.md");
@@ -43,6 +43,12 @@ const page = (source: string) => renderMarkdownPage(source, "page.md");
   assert.match(form, /<pi-form title="決定" submit="送出">/);
   assert.match(form, /<pi-question name="s" label="哪個？" required other=""><pi-choice value="A">A<\/pi-choice><pi-choice value="b" note="n" recommended="建議">B &lt;x&gt;<\/pi-choice><\/pi-question>/);
   assert.match(form, /<pi-question name="補充" label="補充"><\/pi-question>/, "a question without a name is named by its label");
+  assert.match(page("```form\n- {label: q, choices: [a]}\n```\n"), /<pi-question name="q" label="q"><pi-choice/, "without other, the kit adds its own Other box");
+  assert.match(page("```form\n- {label: q, other: false, choices: [a]}\n```\n"), /<pi-question name="q" label="q" other="false">/, "other: false drops it");
+
+  const review = page("```review\ntitle: 首頁\npick: 最喜歡\ncolumns: 2\nitems:\n  - {name: A, label: 深色, image: a.png}\n  - {page: proto/b.html, height: 600}\n  - body: \"**元件**\"\n```\n");
+  assert.match(review, /<pi-review title="首頁" pick="最喜歡" columns="2">\n<pi-item name="A" label="深色" image="a.png"><\/pi-item>\n<pi-item page="proto\/b.html" height="600"><\/pi-item>\n<pi-item><strong>元件<\/strong><\/pi-item>\n<\/pi-review>/);
+  assert.match(page("```review\npick: true\nitems: [a.png, b.png]\n```\n"), /<pi-review pick="">\n<pi-item image="a.png"><\/pi-item>\n<pi-item image="b.png"><\/pi-item>/, "a bare path is an image; pick: true has the kit's own label");
 
   const diff = page("```diff\n@@ a @@\n-old\n+new\n same\n```\n");
   assert.match(diff, /<pre class="pi-diff"><code><span class="pi-hunk">@@ a @@<\/span><span class="pi-del">-old<\/span><span class="pi-add">\+new<\/span><span> same<\/span><\/code><\/pre>/);
@@ -73,6 +79,22 @@ const page = (source: string) => renderMarkdownPage(source, "page.md");
   assert.equal(pageFeedbackMessage(new URLSearchParams([["page", "p"], ["overall", "only"]])), 'User feedback on the page "p":\n\nOverall: only');
 }
 
+// A review: the pick, each commented item (later lines indented), then the items left blank.
+{
+  const fields = new URLSearchParams([
+    ["pi-kind", "review"],
+    ["title", "首頁"],
+    ["picked", "B (深色)"],
+    ["item", "A"],
+    ["comment", "字太小\n按鈕太擠"],
+    ["item", "B (深色)"],
+    ["comment", "好"],
+    ["silent", "C, D"],
+  ]);
+  assert.equal(reviewMessage(fields), 'User reviewed "首頁":\nPicked: B (深色)\n- A: 字太小\n  按鈕太擠\n- B (深色): 好\nNo feedback on: C, D');
+  assert.equal(reviewMessage(new URLSearchParams([["title", "t"], ["picked", "A"]])), 'User reviewed "t":\nPicked: A');
+}
+
 // The page server serves a Markdown file as its rendered page, with the kit and page script.
 {
   const dir = mkdtempSync(join(tmpdir(), "doc-review-md-"));
@@ -85,6 +107,12 @@ const page = (source: string) => renderMarkdownPage(source, "page.md");
     assert.match(html, /<title>Report<\/title>/);
     assert.match(html, /<pi-callout tone="note" title="Note">/);
     assert.match(html, /<\/html>\n\n<link rel="stylesheet" href="[^"]+\/kit\/kit\.css">/);
+
+    // An HTML prototype gets the kit, unless a review item frames it with ?pi-bare.
+    writeFileSync(join(dir, "proto.html"), "<p>as written</p>");
+    const proto = `${server.base}/files${pathToFileURL(join(dir, "proto.html")).pathname}`;
+    assert.match(await (await fetch(proto)).text(), /kit\.css/);
+    assert.equal(await (await fetch(`${proto}?pi-bare=`)).text(), "<p>as written</p>");
   } finally {
     server.close();
     rmSync(dir, { recursive: true, force: true });

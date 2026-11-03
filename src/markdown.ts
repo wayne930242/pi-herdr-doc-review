@@ -5,8 +5,8 @@
  * - GitHub alerts (`> [!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`, with an optional
  *   title after the marker) become `<pi-callout>`.
  * - A `mermaid` code block becomes an SVG diagram, drawn on the server by beautiful-mermaid.
- * - `cards`, `options`, and `form` code blocks hold YAML and become `<pi-grid>`, `<pi-options>`, and
- *   `<pi-form>`; their text fields are Markdown.
+ * - `cards`, `options`, `form`, and `review` code blocks hold YAML and become `<pi-grid>`,
+ *   `<pi-options>`, `<pi-form>`, and `<pi-review>`; their text fields are Markdown.
  * - A `diff` code block colours added, removed, and hunk lines.
  *
  * Raw HTML passes through, so kit elements can also be written as tags.
@@ -101,12 +101,23 @@ function renderForm(data: unknown): string {
     });
     return [
       `<pi-question${attr("name", question.name ?? question.label)}${attr("label", question.label)}${attr("type", question.type)}`,
-      `${attr("hint", question.hint)}${attr("required", question.required === true)}${attr("other", question.other === true ? "" : question.other)}>`,
+      // Choice questions carry a box for the user's own answer unless `other: false`.
+      `${attr("hint", question.hint)}${attr("required", question.required === true)}${attr("other", question.other === true ? "" : question.other === false ? "false" : question.other)}>`,
       rendered.join(""),
       "</pi-question>",
     ].join("");
   });
   return `<pi-form${attr("title", form.title)}${attr("submit", form.submit)}>\n${questions.join("\n")}\n</pi-form>\n`;
+}
+
+function renderReview(data: unknown): string {
+  const review = Array.isArray(data) ? { items: data } : record(data, "review");
+  const rendered = items(review, "items").map((entry) => {
+    const item = typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>) : { image: entry };
+    return `<pi-item${attr("name", item.name)}${attr("label", item.label)}${attr("image", item.image)}${attr("page", item.page)}${attr("height", item.height)}>${prose(item.body)}</pi-item>`;
+  });
+  const pick = review.pick === true ? "" : review.pick || undefined;
+  return `<pi-review${attr("title", review.title)}${attr("submit", review.submit)}${attr("pick", pick)}${attr("columns", review.columns)}>\n${rendered.join("\n")}\n</pi-review>\n`;
 }
 
 function renderDiff(source: string): string {
@@ -123,6 +134,7 @@ const BLOCKS: Record<string, (source: string) => string> = {
   cards: (source) => renderCards(parseYaml(source)),
   options: (source) => renderOptions(parseYaml(source)),
   form: (source) => renderForm(parseYaml(source)),
+  review: (source) => renderReview(parseYaml(source)),
   diff: renderDiff,
 };
 

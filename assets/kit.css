@@ -105,6 +105,24 @@
   pi-form button:disabled { opacity: 0.6; cursor: default; }
   .pi-status { margin-left: 0.75rem; color: var(--pi-muted); }
 
+  /* <pi-review title pick columns> of <pi-item name label image page height> */
+  pi-review { display: block; margin: 2rem 0 1rem; padding: 1rem 1.25rem; border: 2px solid var(--pi-accent); border-radius: var(--pi-radius); }
+  pi-review > .pi-title { font-size: 1.2rem; margin-bottom: 1rem; }
+  .pi-review-items { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 1rem; margin: 0 0 1rem; }
+  pi-item { display: flex; flex-direction: column; gap: 0.6rem; min-width: 0; padding: 0.75rem; border: 1px solid var(--pi-border); border-radius: var(--pi-radius); }
+  pi-item:has(.pi-pick input:checked) { border-color: var(--pi-accent); background: var(--pi-surface); }
+  .pi-review-items[data-columns] { grid-template-columns: repeat(var(--pi-columns), minmax(0, 1fr)); }
+  @media (max-width: 640px) { .pi-review-items[data-columns] { grid-template-columns: minmax(0, 1fr); } }
+  .pi-item-head { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; align-items: baseline; justify-content: space-between; }
+  .pi-item-head .pi-title { margin: 0; }
+  .pi-pick { display: inline-flex; gap: 0.35rem; align-items: center; white-space: nowrap; font-size: 0.9em; cursor: pointer; }
+  .pi-item-body { flex: 1; min-width: 0; overflow-x: auto; }
+  .pi-item-body > :last-child { margin-bottom: 0; }
+  .pi-item-body img { display: block; border-radius: 4px; }
+  .pi-frame { resize: vertical; overflow: hidden; min-height: 120px; border: 1px solid var(--pi-border); border-radius: 4px; }
+  .pi-frame iframe { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
+  pi-item textarea { width: 100%; box-sizing: border-box; min-height: 4rem; font: inherit; color: inherit; background: var(--pi-bg); border: 1px solid var(--pi-border); border-radius: var(--pi-radius); padding: 0.5rem 0.75rem; }
+
   /* Rendered Markdown: mermaid diagrams and diff blocks. */
   .pi-diagram { margin: 0 0 1rem; padding: 1rem; overflow-x: auto; text-align: center; border: 1px solid var(--pi-border); border-radius: var(--pi-radius); }
   .pi-diagram svg { max-width: 100%; height: auto; }
