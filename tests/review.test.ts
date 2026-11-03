@@ -878,6 +878,11 @@ const origin0 = (base) => new URL(base).origin;
   assert.deepEqual(t.sent[0].options, { triggerTurn: true });
   assert.deepEqual(t.results().at(-1), { version: 1, id: html, answerId: "a1", accepted: true });
 
+  // A review sent through the event bus reads as a review, as it does through the page server.
+  t.sent.length = 0;
+  t.form({ version: 1, id: html, answerId: "a-review", fields: [["pi-kind", "review"], ["title", "頁首"], ["picked", "B"]] });
+  assert.equal(t.sent.pop().message.content, 'User reviewed "頁首":\nPicked: B');
+
   // Busy: steered.
   t.state.idle = false;
   t.sent.length = 0;

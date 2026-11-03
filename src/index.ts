@@ -664,6 +664,14 @@ export function reviewMessage(fields: URLSearchParams): string {
   ].join("\n");
 }
 
+/** The agent's message for one answer and its label, by the kit's `pi-kind`; anything else is a form. */
+export function answerMessage(fields: URLSearchParams): [string, string] {
+  const kind = fields.get("pi-kind");
+  if (kind === "feedback") return [pageFeedbackMessage(fields), "Your page feedback"];
+  if (kind === "review") return [reviewMessage(fields), "Your review"];
+  return [formMessage(fields), "Your form answers"];
+}
+
 const isFieldList = (value: unknown): value is [string, string][] =>
   Array.isArray(value) && value.every((field) => Array.isArray(field) && field.length === 2 && field.every((part) => typeof part === "string"));
 
@@ -856,11 +864,8 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
   /** One submitted form as a query string; a form without fields never reaches the agent. */
   const answered = (query: string): void => {
     if (!query) return;
-    const fields = new URLSearchParams(query);
-    const kind = fields.get("pi-kind");
-    if (kind === "feedback") deliver(pageFeedbackMessage(fields), "Your page feedback", true);
-    else if (kind === "review") deliver(reviewMessage(fields), "Your review", true);
-    else deliver(formMessage(fields), "Your form answers", true);
+    const [message, label] = answerMessage(new URLSearchParams(query));
+    deliver(message, label, true);
   };
 
   const closeBrowser = (): void => {
@@ -1233,7 +1238,8 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
       // A Chawan submission without fields never reaches the agent, so this one does not either.
       if (fields.length === 0) return result(false, "empty");
       try {
-        deliver(formMessage(fields), "Your form answers", true);
+        const [message, label] = answerMessage(new URLSearchParams(fields));
+        deliver(message, label, true);
       } catch (error) {
         return result(false, `delivery failed: ${(error as Error).message}`);
       }
