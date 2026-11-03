@@ -40,7 +40,7 @@ function fake(options = {}) {
     servePages: async (onAnswer, allowed) => {
       const server = { base: `http://127.0.0.1:4000/tok${state.servers.length + 1}`, reloads: [], closed: false, onAnswer, allowed };
       state.servers.push(server);
-      return { base: server.base, reload: (path) => server.reloads.push(path), close: () => (server.closed = true) };
+      return { base: server.base, reload: (path) => server.reloads.push(path), refreshFrames: () => {}, close: () => (server.closed = true) };
     },
     onPath: (command) => installed.includes(command),
     pidAlive: (pid) => (state.editorUp && pid === 4242) || (state.browserUp && pid === 5151),
@@ -702,8 +702,8 @@ const origin0 = (base) => new URL(base).origin;
     const reader = stream.body.getReader();
     const decoder = new TextDecoder();
     assert.equal(decoder.decode((await reader.read()).value), ": open\n\n");
-    server.reload(join(dir, "other.html"));
-    server.reload(join(dir, "a b.html"));
+    server.reload(join(real, "other.html"));
+    server.reload(join(real, "a b.html"));
     assert.equal(decoder.decode((await reader.read()).value), "event: reload\ndata:\n\n", "only the changed page's stream hears of it");
     await reader.cancel();
   } finally {

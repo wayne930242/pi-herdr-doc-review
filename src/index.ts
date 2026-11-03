@@ -38,7 +38,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -102,8 +102,10 @@ export interface RunResult {
 export interface PageServer {
   /** `http://127.0.0.1:<port>/<token>`: the page at absolute path `/a/b.html` is `<base>/files/a/b.html`. */
   base: string;
-  /** Tells every open copy of the page at `path` to reload. */
+  /** Tells every open copy of the page at real path `path` to reload. */
   reload: (path: string) => void;
+  /** Reloads every prototype a review item frames whose file changed since it was served. */
+  refreshFrames: () => void;
   close: () => void;
 }
 
@@ -197,6 +199,8 @@ interface Browser {
   /** Opens pages in the running browser, each as its own buffer or tab. */
   open: (paths: string[]) => Promise<void>;
   reload: (path: string) => void;
+  /** Reloads changed prototypes framed by review items; Chawan frames none. */
+  refreshFrames: () => void;
   /** Asks the browser to quit; its pane's shell then removes the scratch dir. */
   quit: () => void;
   /** Stops listening for its form answers. */
@@ -403,6 +407,11 @@ const CONTENT_TYPES: Record<string, string> = {
  * the page, `window.piDocReview.send(fields)` does the same for the kit's `<pi-form>`, and the page
  * reloads when the server sends `reload` for it.
  */
+/** What a bare prototype gets: only the listener that reloads it when the server says it changed. */
+export function reloadScript(base: string): string {
+  return `<script>new EventSource(${JSON.stringify(base)} + "/events?page=" + encodeURIComponent(location.pathname)).addEventListener("reload", () => location.reload());</script>\n`;
+}
+
 export function pageScript(base: string): string {
   return [
     `<link rel="stylesheet" href="${base}/kit/kit.css">`,
@@ -462,6 +471,15 @@ export function createPageServer(onAnswer: (query: string) => void, allowed: (pa
   const filesPrefix = `${prefix}/files`;
   /** Open event streams by the absolute path of the page that opened them. */
   const streams = new Map<string, Set<ServerResponse>>();
+  /** Prototypes served bare into a review item's frame, with their modification time when served. */
+  const frames = new Map<string, number>();
+  const modified = (path: string): number | undefined => {
+    try {
+      return statSync(path).mtimeMs;
+    } catch {
+      return undefined;
+    }
+  };
   const pathOf = (urlPath: string): string | undefined => {
     if (!urlPath.startsWith(`${filesPrefix}/`)) return undefined;
     try {
@@ -506,8 +524,15 @@ export function createPageServer(onAnswer: (query: string) => void, allowed: (pa
     }
     if (request.method !== "GET") return finish(response, 405);
     if (url.pathname === `${prefix}/events`) {
-      const page = pathOf(url.searchParams.get("page") ?? "");
-      if (!page) return finish(response, 400);
+      const asked = pathOf(url.searchParams.get("page") ?? "");
+      if (!asked) return finish(response, 400);
+      // Keyed by real path, as the files are served and reloaded, so a symlinked path still reloads.
+      let page = asked;
+      try {
+        page = realpathSync(asked);
+      } catch {
+        // A page whose file is gone keeps its own path; it has nothing left to reload.
+      }
       response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
       response.write(": open\n\n");
       const open = streams.get(page) ?? new Set();
@@ -548,8 +573,13 @@ export function createPageServer(onAnswer: (query: string) => void, allowed: (pa
     const type = markdown ? CONTENT_TYPES[".html"] : (CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream");
     response.writeHead(200, { "content-type": type, "cache-control": "no-store" });
     // A review item frames an HTML prototype with `?pi-bare`: it shows as written, without the kit.
-    const kitted = HTML_FILE.test(path) && !url.searchParams.has("pi-bare");
-    const page = markdown ? Buffer.from(renderMarkdownPage(content.toString("utf8"), basename(path))) : kitted ? content : undefined;
+    // It still reloads when its file changes, through a listener that adds no style.
+    const bare = HTML_FILE.test(path) && url.searchParams.has("pi-bare");
+    if (bare) {
+      frames.set(path, modified(path) ?? 0);
+      return void response.end(Buffer.concat([content, Buffer.from(`\n${reloadScript(base)}`)]));
+    }
+    const page = markdown ? Buffer.from(renderMarkdownPage(content.toString("utf8"), basename(path))) : HTML_FILE.test(path) ? content : undefined;
     response.end(page ? Buffer.concat([page, Buffer.from(`\n${pageScript(base)}`)]) : content);
   });
   server.unref();
@@ -557,14 +587,24 @@ export function createPageServer(onAnswer: (query: string) => void, allowed: (pa
     server.once("error", fail);
     server.listen(0, "127.0.0.1", () => {
       base = `http://127.0.0.1:${(server.address() as AddressInfo).port}${prefix}`;
+      const reload = (path: string): void => {
+        for (const stream of streams.get(path) ?? []) stream.write("event: reload\ndata:\n\n");
+      };
       done({
         base,
-        reload: (path) => {
-          for (const stream of streams.get(path) ?? []) stream.write("event: reload\ndata:\n\n");
+        reload,
+        refreshFrames: () => {
+          for (const [path, served] of frames) {
+            const now = modified(path);
+            if (now === undefined || now === served) continue;
+            frames.set(path, now);
+            reload(path);
+          }
         },
         close: () => {
           for (const open of streams.values()) for (const stream of open) stream.end();
           streams.clear();
+          frames.clear();
           server.close();
           server.closeAllConnections();
         },
@@ -917,6 +957,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
         for (const path of more) command({ control }, `pager.gotoURL(${url(path)})`);
       },
       reload: (path) => command({ control }, `piDocReviewReload(${url(path)})`),
+      refreshFrames: () => undefined,
       quit: () => command({ control }, "quit()"),
       stop: stopWatch,
       started: false,
@@ -957,6 +998,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
         }
       },
       reload: (path) => server.reload(path),
+      refreshFrames: server.refreshFrames,
       // ctrl+q quits terminal-browser; a pane already gone has nothing left to quit.
       quit: () => void deps.run(deps.herdr, ["pane", "send-keys", pane, "ctrl+q"]),
       stop: server.close,
@@ -981,6 +1023,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
         }
       },
       reload: (path) => server.reload(path),
+      refreshFrames: server.refreshFrames,
       // The user closes the browser tabs; the session only stops serving them.
       quit: () => undefined,
       stop: server.close,
@@ -1147,6 +1190,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
   /** After the agent changes a shown document, the version it saw is the new one, and the pane reloads it. */
   const agentWrote = (path: string): void => {
     reloadPages([path]);
+    if (browser && browserAlive()) browser.refreshFrames();
     bump([path]);
     const doc = shown.get(path);
     if (!doc) return;
@@ -1156,6 +1200,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
 
   const refreshAfterShell = (): void => {
     reloadPages([...pages.keys()]);
+    if (browser && browserAlive()) browser.refreshFrames();
     bump(docs.keys());
     if (shown.size === 0) return;
     for (const [path, doc] of shown) doc.snapshot = deps.readFile(path) ?? doc.snapshot;

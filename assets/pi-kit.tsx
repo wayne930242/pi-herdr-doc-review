@@ -223,7 +223,7 @@ export function Question({ name, label, hint, required = false, type, other, chi
               </label>
             );
           })}
-          {other !== false && (
+          {other !== false && other !== "false" && (
             <label className="pi-choice">
               <input type={input} name={id} checked={picked.includes("\0other")} onChange={(event) => pick("\0other", event.target.checked)} />
               <input
@@ -257,6 +257,30 @@ const bare = (page: string): string => {
   return url.href;
 };
 
+/**
+ * Item names: an item's own name, else the next letter no item claims (A, B, C…, then numbers);
+ * a repeated name gets a number, so every item keeps its own pick value and comment.
+ */
+const itemNames = (names: string[]): string[] => {
+  const claimed = new Set(names.filter(Boolean));
+  const taken = new Set<string>();
+  let next = 0;
+  const free = () => {
+    for (;;) {
+      const name = next < 26 ? String.fromCharCode(65 + next) : String(next + 1);
+      next++;
+      if (!claimed.has(name)) return name;
+    }
+  };
+  return names.map((name) => {
+    const base = name || free();
+    let unique = base;
+    for (let count = 2; taken.has(unique); count++) unique = `${base}${count}`;
+    taken.add(unique);
+    return unique;
+  });
+};
+
 const itemName = (name: string, label?: string): string => (label ? `${name} (${label})` : name);
 
 /**
@@ -266,13 +290,15 @@ const itemName = (name: string, label?: string): string => (label ? `${name} (${
  */
 export function Review({ title, submit, pick, columns, children }: { title?: string; submit?: string; pick?: boolean | string; columns?: number; children?: ReactNode }) {
   const words = kitWords();
-  const items = Children.toArray(children)
+  // As in kit.js, a pick attribute turns picking on even when empty.
+  const picking = pick !== undefined && pick !== false;
+  const props = Children.toArray(children)
     .filter((child) => isValidElement(child) && child.type === Item)
-    .map((child, index) => {
-      const props = (child as { props: ItemProps }).props;
-      return { ...props, value: props.name || String.fromCharCode(65 + index) };
-    });
-  const key = `pi-review:${location.pathname}:${title ?? ""}`;
+    .map((child) => (child as { props: ItemProps }).props);
+  const names = itemNames(props.map((item) => item.name ?? ""));
+  const items = props.map((item, index) => ({ ...item, value: names[index] }));
+  // useId follows the review's place in the page, so two reviews never share a draft.
+  const key = `pi-review:${location.pathname}:${useId()}:${title ?? ""}`;
   const [saved, setSaved] = useState<{ picked: string; comments: Record<string, string> }>(() => JSON.parse(sessionStorage.getItem(key) ?? "null") ?? { picked: "", comments: {} });
   useEffect(() => sessionStorage.setItem(key, JSON.stringify(saved)), [key, saved]);
   const [status, setStatus] = useState("");
@@ -310,10 +336,10 @@ export function Review({ title, submit, pick, columns, children }: { title?: str
           <pi-item key={item.value}>
             <div className="pi-item-head">
               <span className="pi-title">{itemName(item.value, item.label)}</span>
-              {pick ? (
+              {picking ? (
                 <label className="pi-pick">
                   <input type="radio" name={group} checked={saved.picked === item.value} onChange={() => setSaved((current) => ({ ...current, picked: item.value }))} />
-                  {pick === true ? words.pick : pick}
+                  {pick === true || pick === "" ? words.pick : pick}
                 </label>
               ) : null}
             </div>

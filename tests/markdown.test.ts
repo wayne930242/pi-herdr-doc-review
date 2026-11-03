@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -112,7 +112,26 @@ const page = (source: string) => renderMarkdownPage(source, "page.md");
     writeFileSync(join(dir, "proto.html"), "<p>as written</p>");
     const proto = `${server.base}/files${pathToFileURL(join(dir, "proto.html")).pathname}`;
     assert.match(await (await fetch(proto)).text(), /kit\.css/);
-    assert.equal(await (await fetch(`${proto}?pi-bare=`)).text(), "<p>as written</p>");
+    const bare = await (await fetch(`${proto}?pi-bare=`)).text();
+    assert.ok(bare.startsWith("<p>as written</p>\n<script>new EventSource("), "only a reload listener is added");
+    assert.ok(!bare.includes("kit.css"));
+
+    // A framed prototype reloads once its file changes, and not before.
+    const events = await fetch(`${server.base}/events?page=${encodeURIComponent(new URL(proto).pathname)}`);
+    const reader = events.body!.getReader();
+    await reader.read();
+    // One read stays pending across waits, so a chunk that arrives late is not lost to a dropped read.
+    let pending: Promise<string> | undefined;
+    const next = () => {
+      pending ??= reader.read().then(({ value }) => new TextDecoder().decode(value));
+      return Promise.race([pending.then((text) => ((pending = undefined), text)), new Promise((done) => setTimeout(() => done("(none)"), 300))]);
+    };
+    server.refreshFrames();
+    assert.equal(await next(), "(none)", "unchanged: no reload");
+    utimesSync(join(dir, "proto.html"), new Date(), new Date(Date.now() + 5000));
+    server.refreshFrames();
+    assert.match(String(await next()), /event: reload/);
+    await reader.cancel();
   } finally {
     server.close();
     rmSync(dir, { recursive: true, force: true });

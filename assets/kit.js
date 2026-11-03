@@ -161,6 +161,30 @@ const bare = (page) => {
   return url.href;
 };
 
+/**
+ * Item names: an item's own name, else the next letter no item claims (A, B, C…, then numbers);
+ * a repeated name gets a number, so every item keeps its own pick value and comment.
+ */
+const itemNames = (names) => {
+  const claimed = new Set(names.filter(Boolean));
+  const taken = new Set();
+  let next = 0;
+  const free = () => {
+    for (;;) {
+      const name = next < 26 ? String.fromCharCode(65 + next) : String(next + 1);
+      next++;
+      if (!claimed.has(name)) return name;
+    }
+  };
+  return names.map((name) => {
+    const base = name || free();
+    let unique = base;
+    for (let count = 2; taken.has(unique); count++) unique = `${base}${count}`;
+    taken.add(unique);
+    return unique;
+  });
+};
+
 /** An item's name with its label, as the agent reads it: `B (dark header)`. */
 const itemName = (name, label) => (label ? `${name} (${label})` : name);
 
@@ -169,15 +193,16 @@ const itemName = (name, label) => (label ? `${name} (${label})` : name);
  * gives feedback on one by one (an image, an HTML prototype in a frame, or the item's own content),
  * each with a comment box that means "no feedback" when left blank. With `pick` (its value labels the
  * choice), the user also picks one favourite, for an A/B test. Items are named A, B, C… unless they
- * carry a name. Drafts survive the reload an agent's edit causes, kept per page in sessionStorage.
+ * carry a name (see itemNames). Drafts survive the reload an agent's edit causes, kept per page in sessionStorage.
  */
 let reviews = 0;
 class Review extends Built {
   build() {
-    const key = `pi-review:${location.pathname}:${++reviews}`;
+    const title = this.getAttribute("title") ?? "";
+    // Keyed by position and title, so a review the agent inserts above drops a draft rather than taking it.
+    const key = `pi-review:${location.pathname}:${++reviews}:${title}`;
     const saved = JSON.parse(sessionStorage.getItem(key) ?? "null") ?? { picked: "", comments: {} };
     const save = () => sessionStorage.setItem(key, JSON.stringify(saved));
-    const title = this.getAttribute("title") ?? "";
     this.titled();
     const columns = Number(this.getAttribute("columns"));
     const grid = make("div", { className: "pi-review-items" });
@@ -188,8 +213,10 @@ class Review extends Built {
     }
     const pick = this.getAttribute("pick");
     const group = `${key}:pick`;
-    const items = [...this.querySelectorAll(":scope > pi-item")].map((item, index) => {
-      const name = item.getAttribute("name") || String.fromCharCode(65 + index);
+    const elements = [...this.querySelectorAll(":scope > pi-item")];
+    const names = itemNames(elements.map((item) => item.getAttribute("name") ?? ""));
+    const items = elements.map((item, index) => {
+      const name = names[index];
       const label = item.getAttribute("label") ?? "";
       const head = make("div", { className: "pi-item-head" }, make("span", { className: "pi-title", textContent: itemName(name, label) }));
       if (pick !== null) {
