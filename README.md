@@ -71,11 +71,13 @@ Picked: B (light)
 No feedback on: B (light)
 ```
 
+Image items open in a viewer that fills the window, from the item's zoom button, a click on its image, or the review's "View one by one" button. The viewer shows one image at a time with the item's text and comment box beside it: ←/→ or ↑/↓ switch items, Space or Enter moves into the comment box, Esc leaves the box and a second Esc closes the viewer, and a click on the image shows it at full size. Comments and the pick made in the viewer are the item's own, so they stay on the page and go out with the review.
+
 The user can change anything and send again. Drafts survive the reload an agent's edit causes. See [`examples/review-demo.md`](examples/review-demo.md) and [`examples/review-demo.tsx`](examples/review-demo.tsx).
 
 ## Feedback panel
 
-Every page served to the default browser or terminal-browser has a feedback button. Selecting text offers a comment on that passage; the panel collects these comments and an overall note, and sends them to the agent in one message that quotes each passage above its comment. Drafts are kept per page in the tab's session storage, so they survive the reload an agent's edit causes. Images enlarge on click. A page shown inside a review item's frame has no panel of its own. The kit's words follow the page's language, else the browser's.
+Every page served to the default browser or terminal-browser has a feedback button. Selecting text offers a comment on that passage; the panel collects these comments and an overall note, and sends them to the agent in one message that quotes each passage above its comment. Drafts are kept per page in the tab's session storage, so they survive the reload an agent's edit causes. Images enlarge on click; a review item's image opens the review viewer instead. A page shown inside a review item's frame has no panel of its own. The kit's words follow the page's language, else the browser's.
 
 ## Page kit
 

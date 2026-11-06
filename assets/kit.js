@@ -16,8 +16,8 @@ const okBadge = (text) => {
 // which build as soon as they are defined.
 const zh = /^zh/i.test(document.documentElement.lang || navigator.language);
 const words = zh
-  ? { feedback: "回饋", comment: "留言", heading: "給 agent 的回饋", hint: "選取頁面上的文字可以針對那段留言。", overall: "整體意見", send: "送給 agent", sending: "傳送中…", sent: "已送給 agent。", empty: "還沒有內容。", remove: "移除", notSent: "沒送出：", other: "其他（自行填寫）", note: "回饋（留白代表沒意見）", pick: "選這個", unanswered: "還沒回答：", resend: "已送給 agent。改了可以再送一次。" }
-  : { feedback: "Feedback", comment: "Comment", heading: "Feedback for the agent", hint: "Select text on the page to comment on it.", overall: "Overall", send: "Send to agent", sending: "Sending…", sent: "Sent to the agent.", empty: "Nothing to send yet.", remove: "Remove", notSent: "Not sent: ", other: "Other (type your own)", note: "Feedback (leave blank for none)", pick: "Pick this", unanswered: "Unanswered: ", resend: "Sent to the agent. Change anything and send again to update it." };
+  ? { feedback: "回饋", comment: "留言", heading: "給 agent 的回饋", hint: "選取頁面上的文字可以針對那段留言。", overall: "整體意見", send: "送給 agent", sending: "傳送中…", sent: "已送給 agent。", empty: "還沒有內容。", remove: "移除", notSent: "沒送出：", other: "其他（自行填寫）", note: "回饋（留白代表沒意見）", pick: "選這個", unanswered: "還沒回答：", resend: "已送給 agent。改了可以再送一次。", zoom: "放大回饋", zoomAll: "逐張放大檢視", previous: "上一張", next: "下一張", close: "關閉", commented: "已回饋", viewing: "←→ 或 ↑↓ 切換　Space／Enter 寫回饋　Esc 關閉　點圖看原尺寸", writing: "Esc 回到檢視", write: "按 Space 或 Enter 寫回饋（留白代表沒意見）" }
+  : { feedback: "Feedback", comment: "Comment", heading: "Feedback for the agent", hint: "Select text on the page to comment on it.", overall: "Overall", send: "Send to agent", sending: "Sending…", sent: "Sent to the agent.", empty: "Nothing to send yet.", remove: "Remove", notSent: "Not sent: ", other: "Other (type your own)", note: "Feedback (leave blank for none)", pick: "Pick this", unanswered: "Unanswered: ", resend: "Sent to the agent. Change anything and send again to update it.", zoom: "Zoom & comment", zoomAll: "View one by one", previous: "Previous", next: "Next", close: "Close", commented: "commented", viewing: "←→ or ↑↓ switch · Space/Enter write feedback · Esc close · click the image for full size", writing: "Esc back to viewing", write: "Press Space or Enter to write feedback (leave blank for none)" };
 
 /** An element that builds its content once, when it is first attached. */
 class Built extends HTMLElement {
@@ -219,6 +219,8 @@ class Review extends Built {
       const name = names[index];
       const label = item.getAttribute("label") ?? "";
       const head = make("div", { className: "pi-item-head" }, make("span", { className: "pi-title", textContent: itemName(name, label) }));
+      const image = item.getAttribute("image");
+      if (image) head.append(make("button", { type: "button", className: "pi-zoom-review", textContent: words.zoom }));
       if (pick !== null) {
         const radio = make("input", { type: "radio", name: group, value: name, checked: saved.picked === name });
         radio.addEventListener("change", () => {
@@ -228,7 +230,6 @@ class Review extends Built {
         head.append(make("label", { className: "pi-pick" }, radio, pick || words.pick));
       }
       const body = make("div", { className: "pi-item-body" }, ...item.childNodes);
-      const image = item.getAttribute("image");
       if (image) body.prepend(make("img", { src: image, alt: itemName(name, label) }));
       const page = item.getAttribute("page");
       if (page) {
@@ -270,6 +271,9 @@ class Review extends Built {
         button.disabled = false;
       }
     });
+    if (elements.some((item) => item.hasAttribute("image"))) {
+      this.querySelector(":scope > .pi-title")?.after(make("button", { type: "button", className: "pi-zoom-review pi-zoom-all", textContent: words.zoomAll }));
+    }
     this.append(grid, make("div", {}, button, status));
   }
 }
@@ -285,11 +289,142 @@ for (const [tag, element] of [
   if (!customElements.get(tag)) customElements.define(tag, element);
 }
 
-/** Images enlarge on click, unless they are links. */
+/** Sets a text box's value as typing would, so the page's own listeners (React's too) see the change. */
+const typeInto = (box, value) => {
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(box, value);
+  box.dispatchEvent(new Event("input", { bubbles: true }));
+};
+
+/**
+ * The review viewer: a review's image items one at a time, filling the window, with the item's
+ * steps and comment box beside the image. ←/→ or ↑/↓ switch items, Space or Enter goes to the comment
+ * box, Esc leaves the box and then closes the viewer, and a click on the image shows it at full size.
+ * It works on the review's markup (kit.js and React render the same), and the comment box writes
+ * through to the item's own box, so drafts, picks, and sending stay with the review.
+ */
+function reviewViewer() {
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const opener = target.closest(".pi-zoom-review") ?? (target instanceof HTMLImageElement ? target.closest("pi-item .pi-item-body > img") : null);
+    const review = opener?.closest("pi-review");
+    if (!review) return;
+    const items = [...review.querySelectorAll("pi-item")].filter((item) => item.closest("pi-review") === review && item.querySelector(":scope > .pi-item-body > img"));
+    if (items.length === 0) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    view(items, Math.max(0, items.indexOf(opener.closest("pi-item"))), opener);
+  });
+
+  function view(items, start, opener) {
+    let index = start;
+    const image = make("img");
+    const stage = make("div", { className: "pi-viewer-stage" }, image);
+    const count = make("span", { className: "pi-viewer-count" });
+    const previous = make("button", { type: "button", textContent: "‹", title: words.previous });
+    const next = make("button", { type: "button", textContent: "›", title: words.next });
+    const close = make("button", { type: "button", textContent: "×", title: words.close });
+    const title = make("span", { className: "pi-title" });
+    const body = make("div", { className: "pi-viewer-body" });
+    const pick = make("label", { className: "pi-pick" });
+    const note = make("textarea", { placeholder: words.write });
+    const keys = make("p", { className: "pi-viewer-keys", textContent: words.viewing });
+    const side = make("aside", { className: "pi-viewer-side" }, make("div", { className: "pi-viewer-top" }, count, previous, next, close), title, body, pick, note, keys);
+    const box = make("div", { className: "pi-viewer", tabIndex: -1 }, stage, side);
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    box.dataset.piFeedback = "";
+    const overflow = document.documentElement.style.overflow;
+    document.documentElement.style.overflow = "hidden";
+
+    const noteOf = (item) => item.querySelector(":scope > textarea");
+    const tally = () => {
+      const commented = items.filter((each) => noteOf(each)?.value.trim()).length;
+      count.textContent = `${index + 1} / ${items.length}　${words.commented} ${commented}`;
+    };
+    const draw = () => {
+      const item = items[index];
+      const shown = item.querySelector(":scope > .pi-item-body > img");
+      image.src = shown.currentSrc || shown.src;
+      image.alt = shown.alt;
+      stage.classList.remove("pi-actual");
+      stage.scrollTo(0, 0);
+      title.textContent = item.querySelector(".pi-item-head .pi-title")?.textContent ?? "";
+      body.replaceChildren(...[...item.querySelector(":scope > .pi-item-body").childNodes].filter((node) => node !== shown).map((node) => node.cloneNode(true)));
+      const radio = item.querySelector(".pi-pick input");
+      pick.hidden = !radio;
+      if (radio) pick.replaceChildren(make("input", { type: "checkbox", checked: radio.checked }), radio.parentElement.textContent.trim());
+      note.value = noteOf(item)?.value ?? "";
+      tally();
+      previous.disabled = index === 0;
+      next.disabled = index === items.length - 1;
+    };
+    const go = (step) => {
+      const to = Math.min(items.length - 1, Math.max(0, index + step));
+      if (to === index) return;
+      index = to;
+      draw();
+    };
+    const leaveNote = () => {
+      note.blur();
+      box.focus();
+    };
+    const end = () => {
+      document.removeEventListener("keydown", onKey, true);
+      box.remove();
+      document.documentElement.style.overflow = overflow;
+      items[index].scrollIntoView({ block: "nearest" });
+      if (opener.isConnected) opener.focus({ preventScroll: true });
+    };
+    const onKey = (event) => {
+      if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.target === note) {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        return leaveNote();
+      }
+      const moves = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 };
+      if (event.key in moves) go(moves[event.key]);
+      else if (event.key === " " || event.key === "Enter") note.focus();
+      else if (event.key === "Escape") end();
+      else return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    note.addEventListener("input", () => {
+      const own = noteOf(items[index]);
+      if (own) typeInto(own, note.value);
+      tally();
+    });
+    note.addEventListener("focus", () => (keys.textContent = words.writing));
+    note.addEventListener("blur", () => (keys.textContent = words.viewing));
+    pick.addEventListener("click", (event) => {
+      event.preventDefault();
+      items[index].querySelector(".pi-pick input")?.click();
+      draw();
+    });
+    previous.addEventListener("click", () => go(-1));
+    next.addEventListener("click", () => go(1));
+    close.addEventListener("click", end);
+    image.addEventListener("click", () => stage.classList.toggle("pi-actual"));
+    stage.addEventListener("click", (event) => event.target === stage && end());
+    // Mouse clicks on the viewer's buttons leave the keys with the viewer, not the button.
+    side.addEventListener("mouseup", (event) => event.target.closest("button") && box.focus());
+    document.addEventListener("keydown", onKey, true);
+    document.body.append(box);
+    draw();
+    box.focus();
+  }
+}
+
+/** Images enlarge on click, unless they are links; a review item's image opens the review viewer instead. */
 function zoomImages() {
   document.addEventListener("click", (event) => {
     const image = event.target;
     if (!(image instanceof HTMLImageElement) || !image.classList.contains("pi-zoomable")) return;
+    if (image.closest(".pi-viewer")) return;
     const box = make("div", { className: "pi-lightbox" }, make("img", { src: image.currentSrc || image.src, alt: image.alt }));
     const close = () => {
       box.remove();
@@ -302,7 +437,7 @@ function zoomImages() {
   });
   const mark = () => {
     for (const image of document.querySelectorAll("img:not(.pi-zoomable)")) {
-      if (!image.closest("a, .pi-lightbox, button")) image.classList.add("pi-zoomable");
+      if (!image.closest("a, .pi-lightbox, .pi-viewer, button")) image.classList.add("pi-zoomable");
     }
   };
   mark();
@@ -425,6 +560,7 @@ function feedbackPanel() {
   draw();
 }
 
+reviewViewer();
 zoomImages();
 // A page shown in a review item's frame leaves the feedback panel to the page around it.
 if (window.piDocReview && window === window.top) feedbackPanel();

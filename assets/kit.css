@@ -121,6 +121,8 @@
   .pi-item-body img { display: block; border-radius: 4px; }
   .pi-frame { resize: vertical; overflow: hidden; min-height: 120px; border: 1px solid var(--pi-border); border-radius: 4px; }
   .pi-frame iframe { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
+  .pi-zoom-review { margin-left: auto; padding: 0.2rem 0.7rem; font-size: 0.85em; color: var(--pi-accent); background: none; border: 1px solid var(--pi-accent); }
+  pi-review > .pi-zoom-all { display: block; margin: -0.5rem 0 1rem; }
   pi-item textarea { width: 100%; box-sizing: border-box; min-height: 4rem; font: inherit; color: inherit; background: var(--pi-bg); border: 1px solid var(--pi-border); border-radius: var(--pi-radius); padding: 0.5rem 0.75rem; }
 
   /* Rendered Markdown: mermaid diagrams and diff blocks. */
@@ -136,6 +138,28 @@
   img.pi-zoomable { cursor: zoom-in; }
   .pi-lightbox { position: fixed; inset: 0; z-index: 2147483646; display: flex; align-items: center; justify-content: center; padding: 2rem; background: color-mix(in srgb, #000 80%, transparent); cursor: zoom-out; }
   .pi-lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: var(--pi-radius); background: var(--pi-bg); }
+
+  /* The review viewer: one image item at a time, its steps and comment box beside it. */
+  .pi-viewer { position: fixed; inset: 0; z-index: 2147483646; display: grid; grid-template-columns: minmax(0, 1fr) min(400px, 34vw); color: var(--pi-fg); background: color-mix(in srgb, #000 94%, transparent); font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif; outline: none; }
+  .pi-viewer-stage { display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; padding: 1.5rem; overflow: auto; cursor: zoom-out; }
+  .pi-viewer-stage img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; background: var(--pi-bg); cursor: zoom-in; }
+  .pi-viewer-stage.pi-actual { align-items: flex-start; justify-content: flex-start; }
+  .pi-viewer-stage.pi-actual img { max-width: none; max-height: none; margin: auto; cursor: zoom-out; }
+  .pi-viewer-side { display: flex; flex-direction: column; gap: 0.75rem; min-height: 0; padding: 1rem 1.25rem; overflow-y: auto; background: var(--pi-bg); border-left: 1px solid var(--pi-border); }
+  .pi-viewer-top { display: flex; gap: 0.4rem; align-items: center; }
+  .pi-viewer-count { flex: 1; color: var(--pi-muted); font-size: 0.9em; }
+  .pi-viewer-top button { padding: 0.15rem 0.7rem; font-size: 1.2em; line-height: 1.4; color: var(--pi-fg); background: var(--pi-surface); border: 1px solid var(--pi-border); }
+  .pi-viewer .pi-title { margin: 0; font-size: 1.1em; }
+  .pi-viewer-body > :last-child { margin-bottom: 0; }
+  .pi-viewer .pi-pick[hidden] { display: none; }
+  .pi-viewer textarea { flex: 1; min-height: 10rem; width: 100%; box-sizing: border-box; font: inherit; color: inherit; background: var(--pi-bg); border: 1px solid var(--pi-border); border-radius: var(--pi-radius); padding: 0.6rem 0.75rem; resize: none; }
+  .pi-viewer textarea:focus { border-color: var(--pi-accent); outline: 2px solid color-mix(in srgb, var(--pi-accent) 40%, transparent); }
+  .pi-viewer-keys { margin: 0; color: var(--pi-muted); font-size: 0.85em; }
+  @media (max-width: 800px) {
+    .pi-viewer { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+    .pi-viewer-side { max-height: 45vh; border-left: 0; border-top: 1px solid var(--pi-border); }
+    .pi-viewer textarea { min-height: 5rem; }
+  }
 
   /* The feedback panel every page carries. */
   .pi-fb-toggle, .pi-fb-quote-button { position: fixed; z-index: 2147483645; font: 600 14px/1 system-ui, sans-serif; color: #fff; background: var(--pi-accent); border: 0; border-radius: 999px; padding: 0.7rem 1.1rem; cursor: pointer; box-shadow: 0 2px 8px rgb(0 0 0 / 25%); }

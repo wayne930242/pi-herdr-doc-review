@@ -22,8 +22,8 @@ export function send(fields: [string, string][] | Record<string, string>): Promi
 const inChinese = (): boolean => /^zh/i.test(document.documentElement.lang || navigator.language);
 const kitWords = () =>
   inChinese()
-    ? { send: "送給 agent", sending: "傳送中…", resend: "已送給 agent。改了可以再送一次。", notSent: "沒送出：", unanswered: "還沒回答：", empty: "還沒有內容。", other: "其他（自行填寫）", note: "回饋（留白代表沒意見）", pick: "選這個" }
-    : { send: "Send to agent", sending: "Sending…", resend: "Sent to the agent. Change anything and send again to update it.", notSent: "Not sent: ", unanswered: "Unanswered: ", empty: "Nothing to send yet.", other: "Other (type your own)", note: "Feedback (leave blank for none)", pick: "Pick this" };
+    ? { send: "送給 agent", sending: "傳送中…", resend: "已送給 agent。改了可以再送一次。", notSent: "沒送出：", unanswered: "還沒回答：", empty: "還沒有內容。", other: "其他（自行填寫）", note: "回饋（留白代表沒意見）", pick: "選這個", zoom: "放大回饋", zoomAll: "逐張放大檢視" }
+    : { send: "Send to agent", sending: "Sending…", resend: "Sent to the agent. Change anything and send again to update it.", notSent: "Not sent: ", unanswered: "Unanswered: ", empty: "Nothing to send yet.", other: "Other (type your own)", note: "Feedback (leave blank for none)", pick: "Pick this", zoom: "Zoom & comment", zoomAll: "View one by one" };
 
 const render = async (kind: "markdown" | "mermaid", source: string): Promise<string> => {
   if (!window.piDocReview) throw new Error("this page was not opened by show_doc");
@@ -331,11 +331,22 @@ export function Review({ title, submit, pick, columns, children }: { title?: str
   return (
     <pi-review data-static="">
       <Title>{title}</Title>
+      {/* kit.js opens the review viewer from these buttons and from a click on an item's image. */}
+      {items.some((item) => item.image) && (
+        <button type="button" className="pi-zoom-review pi-zoom-all">
+          {words.zoomAll}
+        </button>
+      )}
       <div className="pi-review-items" data-columns={columns ? "" : undefined} style={columns ? ({ "--pi-columns": String(columns) } as CSSProperties) : undefined}>
         {items.map((item) => (
           <pi-item key={item.value}>
             <div className="pi-item-head">
               <span className="pi-title">{itemName(item.value, item.label)}</span>
+              {item.image && (
+                <button type="button" className="pi-zoom-review">
+                  {words.zoom}
+                </button>
+              )}
               {picking ? (
                 <label className="pi-pick">
                   <input type="radio" name={group} checked={saved.picked === item.value} onChange={() => setSaved((current) => ({ ...current, picked: item.value }))} />
