@@ -250,8 +250,8 @@ class Review extends Built {
     const button = make("button", { type: "button", textContent: this.getAttribute("submit") ?? words.send });
     button.addEventListener("click", async () => {
       const picked = items.find((item) => item.value === saved.picked);
+      // A blank box means no feedback, so a review with every box blank is still an answer.
       const commented = items.filter((item) => item.note.value.trim());
-      if (!picked && commented.length === 0) return void (status.textContent = words.empty);
       const fields = [["pi-kind", "review"], ["title", title || document.title]];
       if (picked) fields.push(["picked", picked.name]);
       for (const item of commented) fields.push(["item", item.name], ["comment", item.note.value.trim()]);

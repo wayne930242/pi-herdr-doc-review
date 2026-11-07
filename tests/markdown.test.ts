@@ -93,6 +93,8 @@ const page = (source: string) => renderMarkdownPage(source, "page.md");
   ]);
   assert.equal(reviewMessage(fields), 'User reviewed "首頁":\nPicked: B (深色)\n- A: 字太小\n  按鈕太擠\n- B (深色): 好\nNo feedback on: C, D');
   assert.equal(reviewMessage(new URLSearchParams([["title", "t"], ["picked", "A"]])), 'User reviewed "t":\nPicked: A');
+  // Blank means no feedback, so a review with every box blank still answers the agent.
+  assert.equal(reviewMessage(new URLSearchParams([["title", "t"], ["silent", "A, B"]])), 'User reviewed "t":\nNo feedback on: A, B');
 }
 
 // The page server serves a Markdown file as its rendered page, with the kit and page script.

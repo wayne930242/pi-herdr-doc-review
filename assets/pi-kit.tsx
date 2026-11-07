@@ -22,8 +22,8 @@ export function send(fields: [string, string][] | Record<string, string>): Promi
 const inChinese = (): boolean => /^zh/i.test(document.documentElement.lang || navigator.language);
 const kitWords = () =>
   inChinese()
-    ? { send: "送給 agent", sending: "傳送中…", resend: "已送給 agent。改了可以再送一次。", notSent: "沒送出：", unanswered: "還沒回答：", empty: "還沒有內容。", other: "其他（自行填寫）", note: "回饋（留白代表沒意見）", pick: "選這個", zoom: "放大回饋", zoomAll: "逐張放大檢視" }
-    : { send: "Send to agent", sending: "Sending…", resend: "Sent to the agent. Change anything and send again to update it.", notSent: "Not sent: ", unanswered: "Unanswered: ", empty: "Nothing to send yet.", other: "Other (type your own)", note: "Feedback (leave blank for none)", pick: "Pick this", zoom: "Zoom & comment", zoomAll: "View one by one" };
+    ? { send: "送給 agent", sending: "傳送中…", resend: "已送給 agent。改了可以再送一次。", notSent: "沒送出：", unanswered: "還沒回答：", other: "其他（自行填寫）", note: "回饋（留白代表沒意見）", pick: "選這個", zoom: "放大回饋", zoomAll: "逐張放大檢視" }
+    : { send: "Send to agent", sending: "Sending…", resend: "Sent to the agent. Change anything and send again to update it.", notSent: "Not sent: ", unanswered: "Unanswered: ", other: "Other (type your own)", note: "Feedback (leave blank for none)", pick: "Pick this", zoom: "Zoom & comment", zoomAll: "View one by one" };
 
 const render = async (kind: "markdown" | "mermaid", source: string): Promise<string> => {
   if (!window.piDocReview) throw new Error("this page was not opened by show_doc");
@@ -307,8 +307,8 @@ export function Review({ title, submit, pick, columns, children }: { title?: str
   const sendReview = async () => {
     const comment = (value: string) => (saved.comments[value] ?? "").trim();
     const picked = items.find((item) => item.value === saved.picked);
+    // A blank box means no feedback, so a review with every box blank is still an answer.
     const commented = items.filter((item) => comment(item.value));
-    if (!picked && commented.length === 0) return setStatus(words.empty);
     const fields: [string, string][] = [["pi-kind", "review"], ["title", title || document.title]];
     if (picked) fields.push(["picked", itemName(picked.value, picked.label)]);
     for (const item of commented) fields.push(["item", itemName(item.value, item.label)], ["comment", comment(item.value)]);
