@@ -37,10 +37,17 @@ function fake(options = {}) {
     herdr: "herdr",
     editor: options.editor,
     browser: options.browser,
-    servePages: async (onAnswer, allowed) => {
-      const server = { base: `http://127.0.0.1:4000/tok${state.servers.length + 1}`, reloads: [], closed: false, onAnswer, allowed };
+    servePages: async (onAnswer, allowed, onIdle) => {
+      const server = { base: `http://127.0.0.1:4000/tok${state.servers.length + 1}`, reloads: [], closed: false, onAnswer, allowed, onIdle, open: new Set(), touches: 0 };
       state.servers.push(server);
-      return { base: server.base, reload: (path) => server.reloads.push(path), refreshFrames: () => {}, close: () => (server.closed = true) };
+      return {
+        base: server.base,
+        reload: (path) => server.reloads.push(path),
+        refreshFrames: () => {},
+        isOpen: (path) => server.open.has(path),
+        touch: () => server.touches++,
+        close: () => (server.closed = true),
+      };
     },
     onPath: (command) => installed.includes(command),
     pidAlive: (pid) => (state.editorUp && pid === 4242) || (state.browserUp && pid === 5151),
@@ -99,6 +106,7 @@ function fake(options = {}) {
       };
     },
     newId: () => `doc-${++ids}`,
+    now: () => state.now ?? 0,
   };
   const emitted = [];
   const listeners = new Map();
@@ -568,6 +576,47 @@ const editorLaunch = (calls) => calls.find((call) => call[0] === "herdr" && call
   review.closeBrowser();
   assert.equal(t.state.servers[0].closed, true);
   assert.deepEqual(t.state.removed, [SCRATCH]);
+  // Only the default browser stops on idle: its tabs live outside Herdr, with no pane to check.
+  assert.equal(typeof t.state.servers[0].onIdle, "function");
+
+  // Once the user closes the last tab the session stops serving, and the next show starts a server and opens the pages again.
+  await review.show(CWD, ["a.html"], "Again");
+  assert.equal(t.state.servers.length, 2);
+  t.state.servers[1].onIdle();
+  assert.equal(t.state.servers[1].closed, true);
+  assert.deepEqual(t.lists().at(-1).filter((doc) => doc.onScreen), [], "closed tabs leave the screen");
+  await review.show(CWD, ["a.html"], "Once more");
+  assert.equal(t.state.servers.length, 3);
+  assert.equal(opened().at(-1), "http://127.0.0.1:4000/tok3/files/repo/a.html", "the page opens again from the new server");
+  // An idle report from a server already replaced leaves the current one alone.
+  t.state.servers[1].onIdle();
+  assert.equal(t.state.servers[2].closed, false);
+  // Each tab about to open restarts the idle wait, so it gets all of it to connect.
+  assert.equal(t.state.servers[2].touches, 1);
+
+  // A page whose tab the user closed opens again; one still open, or just sent and still loading, reloads instead.
+  const server = t.state.servers[2];
+  await review.show(CWD, ["a.html"], "Still loading");
+  assert.equal(opened().length, 5, "a tab sent moments ago is not opened twice");
+  t.state.now = 60_000;
+  server.open.add("/repo/a.html");
+  await review.show(CWD, ["a.html"], "Open tab");
+  assert.equal(opened().length, 5, "an open tab reloads");
+  server.open.delete("/repo/a.html");
+  await review.show(CWD, ["a.html"], "Closed tab");
+  assert.equal(opened().length, 6, "a closed tab opens again");
+  assert.equal(server.touches, 2);
+}
+
+// A browser that cannot start closes the server it was given, so no idle report comes from it later.
+{
+  const t = fake({ installed: [OPENER], files: { "/repo/a.html": "a" } });
+  t.deps.makeDir = () => {
+    throw new Error("ENOSPC");
+  };
+  await assert.rejects(createDocReview(t.pi, t.deps).show(CWD, ["a.html"], "Look"), /ENOSPC/);
+  assert.equal(t.state.servers[0].closed, true);
+  t.state.servers[0].onIdle();
 
   const failing = fake({ installed: [OPENER], files: { "/repo/a.html": "a" } });
   failing.state.openerFails = true;
@@ -710,6 +759,53 @@ const origin0 = (base) => new URL(base).origin;
     server.close();
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+// The page server reports idle once no page has held its event stream for the grace period: a reload reconnects in time, a closed tab does not.
+{
+  const dir = mkdtempSync(join(tmpdir(), "doc-review-idle-"));
+  writeFileSync(join(dir, "a.html"), "<p>a</p>");
+  let idle = 0;
+  const server = await createPageServer(() => {}, () => true, () => idle++, 300);
+  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+  const page = `${new URL(server.base).pathname}/files${pathToFileURL(join(dir, "a.html")).pathname}`;
+  const stream = async () => {
+    const controller = new AbortController();
+    const response = await fetch(`${server.base}/events?page=${encodeURIComponent(page)}`, { signal: controller.signal });
+    const reader = response.body.getReader();
+    await reader.read();
+    return () => controller.abort();
+  };
+  try {
+    // A page that opens within the grace period keeps the server.
+    await wait(150);
+    let closeTab = await stream();
+    await wait(450);
+    assert.equal(idle, 0, "an open page keeps the server");
+    // A reload drops the stream and reconnects at once.
+    closeTab();
+    await wait(50);
+    closeTab = await stream();
+    await wait(450);
+    assert.equal(idle, 0, "a reload keeps the server");
+    closeTab();
+    await wait(600);
+    assert.equal(idle, 1, "the last tab closing makes the server idle once");
+  } finally {
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // A server no page ever reached goes idle too, and a closed server never reports idle.
+  let unseen = 0;
+  const lonely = await createPageServer(() => {}, () => true, () => unseen++, 100);
+  await wait(250);
+  lonely.close();
+  assert.equal(unseen, 1);
+  let closed = 0;
+  const early = await createPageServer(() => {}, () => true, () => closed++, 100);
+  early.close();
+  await wait(250);
+  assert.equal(closed, 0);
 }
 
 // The document contract: `documents` lists everything shown, in full, on every change.

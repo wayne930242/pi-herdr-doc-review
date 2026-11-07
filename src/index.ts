@@ -88,6 +88,10 @@ const READY_WAIT_MS = 5000;
 const READY_POLL_MS = 100;
 /** terminal-browser starts Chromium before it lists itself, so a second page waits this long for it. */
 export const TERMINAL_BROWSER_WAIT_MS = 15_000;
+/** How long the page server waits with no page open before it reports idle: a reload reconnects well within it, a browser's cold start too. */
+export const PAGE_IDLE_MS = 30_000;
+/** How long a page just sent to the default browser counts as open before its tab connects. */
+export const PAGE_OPEN_WAIT_MS = 15_000;
 const TERMINAL_BROWSER_POLL_MS = 250;
 /** The largest form submission the page server reads. */
 const MAX_ANSWER_BYTES = 1_000_000;
@@ -106,6 +110,10 @@ export interface PageServer {
   reload: (path: string) => void;
   /** Reloads every prototype a review item frames whose file changed since it was served. */
   refreshFrames: () => void;
+  /** Whether a page at real path `path` holds the event stream now. */
+  isOpen: (path: string) => boolean;
+  /** Restarts the idle wait while no page is open, so a page about to open gets all of it. */
+  touch: () => void;
   close: () => void;
 }
 
@@ -117,7 +125,8 @@ export interface DocReviewDeps {
   /** The browser the user chose through PI_HERDR_DOC_REVIEW_BROWSER, if any. */
   browser: string | undefined;
   /** Starts a page server; `onAnswer` gets the query string of each submitted form. */
-  servePages: (onAnswer: (query: string) => void, allowed: (path: string) => boolean) => Promise<PageServer>;
+  /** `onIdle`, when given, runs once no page has held the server's event stream for {@link PAGE_IDLE_MS}. */
+  servePages: (onAnswer: (query: string) => void, allowed: (path: string) => boolean, onIdle?: () => void) => Promise<PageServer>;
   onPath: (command: string) => boolean;
   pidAlive: (pid: number) => boolean;
   run: (command: string, args: string[]) => RunResult;
@@ -132,6 +141,7 @@ export interface DocReviewDeps {
   /** Calls `tick` every `ms` until the returned function is called. */
   every: (ms: number, tick: () => void) => () => void;
   newId: () => string;
+  now: () => number;
 }
 
 const defaultDeps: DocReviewDeps = {
@@ -139,7 +149,7 @@ const defaultDeps: DocReviewDeps = {
   herdr: process.env.HERDR_BIN_PATH ?? "herdr",
   editor: process.env[EDITOR_ENV],
   browser: process.env[BROWSER_ENV],
-  servePages: (onAnswer, allowed) => createPageServer(onAnswer, allowed),
+  servePages: (onAnswer, allowed, onIdle) => createPageServer(onAnswer, allowed, onIdle),
   onPath: (command) => spawnSync("sh", ["-c", 'command -v "$1"', "sh", command], { stdio: "ignore" }).status === 0,
   pidAlive: (pid) => {
     try {
@@ -177,6 +187,7 @@ const defaultDeps: DocReviewDeps = {
     return () => clearInterval(timer);
   },
   newId: randomUUID,
+  now: Date.now,
 };
 
 interface Viewer {
@@ -207,6 +218,8 @@ interface Browser {
   stop: () => void;
   /** Set once its pane's shell is up, so the pane check does not take a starting browser for a quit one. */
   started: boolean;
+  /** The default browser only: whether the user closed the page's tab, so showing it again opens a new one. */
+  closed?: (path: string) => boolean;
 }
 
 /** A browser that is ready to run, and the command its pane's shell runs. */
@@ -464,13 +477,35 @@ export const PAGE_POLICY = "default-src 'self' data: blob:; script-src 'self' 'u
  * to can load files or post answers. `GET <base>/files/<absolute path>` returns the file when its
  * real path passes `allowed`, an HTML file with {@link pageScript} added; `POST <base>/answer` hands
  * the body to `onAnswer`; `GET <base>/events?page=<page path>` is the event stream that tells a page
- * to reload. Every response carries {@link PAGE_POLICY}.
+ * to reload. Every response carries {@link PAGE_POLICY}. Every open page holds an event stream, so
+ * once none has for `idleMs` the server calls `onIdle`; the caller is expected to close it.
  */
-export function createPageServer(onAnswer: (query: string) => void, allowed: (path: string) => boolean): Promise<PageServer> {
+export function createPageServer(
+  onAnswer: (query: string) => void,
+  allowed: (path: string) => boolean,
+  onIdle?: () => void,
+  idleMs = PAGE_IDLE_MS,
+): Promise<PageServer> {
   const prefix = `/${randomUUID()}`;
   const filesPrefix = `${prefix}/files`;
   /** Open event streams by the absolute path of the page that opened them. */
   const streams = new Map<string, Set<ServerResponse>>();
+  let openStreams = 0;
+  let idleTimer: NodeJS.Timeout | undefined;
+  let stopped = false;
+  const stopIdle = (): void => {
+    clearTimeout(idleTimer);
+    idleTimer = undefined;
+  };
+  const startIdle = (): void => {
+    if (!onIdle || stopped || openStreams > 0) return;
+    stopIdle();
+    idleTimer = setTimeout(() => {
+      idleTimer = undefined;
+      if (!stopped && openStreams === 0) onIdle();
+    }, idleMs);
+    idleTimer.unref();
+  };
   /** Prototypes served bare into a review item's frame, with their modification time when served. */
   const frames = new Map<string, number>();
   const modified = (path: string): number | undefined => {
@@ -537,7 +572,13 @@ export function createPageServer(onAnswer: (query: string) => void, allowed: (pa
       response.write(": open\n\n");
       const open = streams.get(page) ?? new Set();
       streams.set(page, open.add(response));
-      response.on("close", () => open.delete(response));
+      openStreams++;
+      stopIdle();
+      response.on("close", () => {
+        open.delete(response);
+        openStreams--;
+        startIdle();
+      });
       return;
     }
     if (url.pathname.startsWith(`${prefix}/kit/`)) {
@@ -587,6 +628,8 @@ export function createPageServer(onAnswer: (query: string) => void, allowed: (pa
     server.once("error", fail);
     server.listen(0, "127.0.0.1", () => {
       base = `http://127.0.0.1:${(server.address() as AddressInfo).port}${prefix}`;
+      // A server no page ever reaches goes idle as well.
+      startIdle();
       const reload = (path: string): void => {
         for (const stream of streams.get(path) ?? []) stream.write("event: reload\ndata:\n\n");
       };
@@ -601,7 +644,11 @@ export function createPageServer(onAnswer: (query: string) => void, allowed: (pa
             reload(path);
           }
         },
+        isOpen: (path) => (streams.get(path)?.size ?? 0) > 0,
+        touch: startIdle,
         close: () => {
+          stopped = true;
+          stopIdle();
           for (const open of streams.values()) for (const stream of open) stream.end();
           streams.clear();
           frames.clear();
@@ -704,7 +751,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     return Number.isInteger(pid) && pid > 0 && deps.pidAlive(pid);
   };
   const viewerAlive = (): boolean => viewer !== undefined && alive(viewer.ready);
-  // The default browser runs outside Herdr, so its pages count as open until the session closes them.
+  // The default browser runs outside Herdr, so its pages count as open until its page server goes idle or the session closes them.
   const browserAlive = (): boolean => browser !== undefined && (browser.program === EXTERNAL || alive(browser.ready));
   /** Queues an Ex command for the editor, or a JavaScript line for the browser; it runs on the next poll. */
   const command = (target: { control: string }, line: string): void => deps.appendFile(target.control, `${line}\n`);
@@ -1016,6 +1063,7 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
   /** Opens pages from the page server in the user's default browser; no Herdr pane is involved. */
   const startExternal = (server: PageServer): Browser => {
     const url = (path: string) => `${server.base}/files${pathToFileURL(path).pathname}`;
+    const openedAt = new Map<string, number>();
     return {
       program: EXTERNAL,
       pane: "",
@@ -1023,10 +1071,13 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
       ready: "",
       open: async (more) => {
         for (const path of more) {
+          server.touch();
           const opened = deps.run(OPENER, [url(path)]);
           if (opened.status !== 0) throw new Error(`${OPENER} failed: ${(opened.stderr || opened.stdout).trim()}`);
+          openedAt.set(path, deps.now());
         }
       },
+      closed: (path) => !server.isOpen(path) && deps.now() - (openedAt.get(path) ?? -Infinity) >= PAGE_OPEN_WAIT_MS,
       reload: (path) => server.reload(path),
       refreshFrames: server.refreshFrames,
       // The user closes the browser tabs; the session only stops serving them.
@@ -1042,7 +1093,18 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
     const program = chooseBrowser();
     for (const path of paths) servable.add(path);
     if (program === EXTERNAL) {
-      browser = startExternal(await deps.servePages(answered, canServe));
+      // The default browser runs outside Herdr, with no pane to check: once its last tab closes, the session stops serving.
+      let external: Browser | undefined;
+      const server = await deps.servePages(answered, canServe, () => {
+        if (external && browser === external) closeBrowser();
+      });
+      try {
+        external = startExternal(server);
+      } catch (error) {
+        server.close();
+        throw error;
+      }
+      browser = external;
       // showHtml opens every page as a tab of its own.
       return [];
     }
@@ -1106,8 +1168,10 @@ export function createDocReview(pi: ExtensionAPI, deps: DocReviewDeps = defaultD
   /** Opens HTML pages in the browser; returns the ones not already on screen. */
   const showHtml = async (cwd: string, docs: { absolute: string; content: string }[]) => {
     const running = browser !== undefined && browserAlive();
-    const fresh = running ? docs.filter((doc) => !pages.has(doc.absolute)) : docs;
+    const fresh = running ? docs.filter((doc) => !pages.has(doc.absolute) || browser?.closed?.(doc.absolute)) : docs;
     if (running) {
+      // A page whose tab the user closed opens again rather than reloading nothing.
+      for (const doc of fresh) pages.delete(doc.absolute);
       for (const doc of docs) servable.add(doc.absolute);
       reloadPages(docs.map((doc) => doc.absolute));
     } else {
